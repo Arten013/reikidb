@@ -214,8 +214,10 @@ class DBUnit(object):
         time_limit = datetime.now() + timedelta(seconds=timeout)
         release_interval = release_interval or self._auto_release_interval
         #print('release interval:', release_interval)
-        while time_limit > datetime.now():
-            exm = None
+        first_flag=True
+        while first_flag or time_limit > datetime.now():
+            first_flag=False
+            # exm = None
             try:
                 if not self.is_acquired(_from_outside=False):
                     print('try to open database', self.path)
@@ -224,11 +226,10 @@ class DBUnit(object):
                 self._set_release_time(release_interval, _from_outside=False)
                 return True
             except plyvel.Error as e:
-                exm = traceback.format_exc()
+                # exm = traceback.format_exc()
                 sleep(self._retry_interval)
-                timeout >= 0 and print('retry')
+                # timeout >= 0 and print('retry')
                 continue
-        exm and print(exm)
         return False
 
     @lock_deco

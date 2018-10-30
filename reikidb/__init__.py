@@ -21,7 +21,7 @@ class ReikiKVSDictDB(object):
         self._db_cache = dict()
 
     def _dbunit_factory(self, mcode):
-        return db_unit.DBUnit(self.get_db_path(mcode), self._auto_release_interval, self._db_acquire_timeout)
+        return db_unit.DBUnit(self.get_db_path(mcode), auto_release_interval=self._auto_release_interval, timeout=self._db_acquire_timeout)
     
     def remove_files(self):
         shutil.rmtree(self.basepath)
@@ -36,12 +36,13 @@ class ReikiKVSDictDB(object):
     def get_db_path(self, mcode):
         return self.basepath / Path(mcode)
         
-    def get_db(self, mcode):
+    def get_db(self, mcode, timeout=None):
         if mcode not in self._db_cache:
             dbpath = self.get_db_path(mcode)
             if not dbpath.exists():
                 os.makedirs(str(dbpath))
             self._db_cache[mcode] = self._db_unit_factory(mcode)
+        self._db_cache[mcode].acquire(timeout=timeout)
         return self._db_cache[mcode]
         
     def __getitem__(self, key):
@@ -115,16 +116,42 @@ class ReikiKVSDictDB(object):
                 running_count -= 1
             else:
                 yield item
-    
+    """
     def qitems(self):
+        jobqueue = Queue()
+        resqueue = Queue()
+        jqlock = Lock()
+        for mcode in mcodes:
+            jobqueue.put(mcodes)
+        if jobqueue.empty():
+            raise StopIteration
         def enqueue_func(mcode):
                 queue = enqueue_func.queue
                 db = self.get_db(mcode)
                 for item_key, value in db.iterator(include_key=True, include_value=True):
                     queue.put((self._decode_key(mcode, item_key), pickle.loads(value)))
                 queue.put(None)
-        for k, v in self._qiter_base(enqueue_func):
-            yield k, v
+        while True:
+            task_mcode = None
+            jqlock.acquire()
+            if jobqueue.empty():
+                jqlock.release()
+                break
+            while res_iter or task_mcode:
+                if resqueue.empty():
+                    task_mcode = jobqueue.get_no_wait()
+                    try:
+                        db = self.get_db(task_mcode, timeout=0)
+                    except:
+                        jobqueue.put(task_mcode)
+                        sleep(0.1)
+                else:
+                    res_iter = resqueue.get_no_wait()
+            jqlock.release()
+            if task_mcode:
+            else:
+            yield from res_iter
+    """
 
     def qkeys(self):
         def enqueue_func(mcode):

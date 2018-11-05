@@ -10,32 +10,6 @@ from datetime import datetime, timedelta
 from time import sleep
 import traceback
 
-def print_deco(func):
-    def wrapper(self, *args, **kwargs):
-        func.__name__ != 'wait' and print(func.__name__)
-        return func(self, *args, **kwargs)
-    return wrapper
-
-class PrintCondition(object):
-    def __init__(self, *args, **kwargs):
-        self.lock = Condition(*args, **kwargs)
-    
-    @print_deco
-    def acquire(self, *args, **kwargs):
-        return self.lock.acquire(*args, **kwargs)
-        
-    @print_deco
-    def release(self, *args, **kwargs):
-        return self.lock.release(*args, **kwargs)
-
-    @print_deco
-    def wait(self, *args, **kwargs):
-        return self.lock.wait(*args, **kwargs)
-        
-    @print_deco
-    def notify(self, *args, **kwargs):
-        return self.lock.notify(*args, **kwargs)
-
 def lock_deco(func):
     def wrapper(self, *args, **kwargs):
         _from_outside = kwargs.get('_from_outside', True)
@@ -59,45 +33,59 @@ def load_leveldb_deco(release_interval=None, timeout=None):
 INF_RELEASE_TIME = -1
 
 class WriteBatch(object):
-    def __init__(self, udb, *args, **kwargs):
+    def __init__(self, udb, transaction=False, sync=False):
         self.udb = udb
-        self.wb = udb.db.write_batch(*args, **kwargs)
-        self._restart_releaser = False
+        self.wb = udb.db.write_batch(transaction=transaction, sync=sync)
+        #self._restart_releaser = False
         
-    def close(self):
-        self.wb.close()
-        if self._restart_releaser:
-            self.udb.release()
+    def write(self):
+        self.wb.write()
+        #if self._restart_releaser:
+        self.udb.release()
     
     def __enter__(self):
-        if not self.udb.releaser_is_suspended():
-            self.udb.suspend_releaser()
-            self._restart_releaser = True
-        return self.wb.__enter__()
+        #if not self.udb.releaser_is_suspended():
+        self.udb.suspend_releaser()
+        #self._restart_releaser = True
+        return self
     
-    def __exit__(self, *args, **kwargs):
-        self.wb.__exit__(*args, **kwargs)
-        if self._restart_releaser:
-            self.udb.release()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.wb.transaction and exc_type is not None:
+            # Exception occurred in transaction; do not write the batch
+            self.wb.clear()
+            return
+        #if self._restart_releaser:
+        self.write()
+        self.wb.clear()
         
-    def __getattr__(self, attr):
-        return getattr(self.wb, attr)
+    def put(self, *args, **kwargs):
+        return self.wb.put(*args, **kwargs)
     
 class Iterator(object):
     def __init__(self, udb, *args, **kwargs):
         self.udb = udb
         self.args = args
         self.kwargs = kwargs
-        self._restart_releaser = False
+        self.iterator = None
         
     def __iter__(self):
-        if not self.udb.releaser_is_suspended():
+        #if not self.udb.releaser_is_suspended():
+        try:
             self.udb.suspend_releaser()
-            self._restart_releaser = True
-        yield from self.udb.db.iterator(*self.args, **self.kwargs)
-        if self._restart_releaser:
-            self.udb.release()
+            self.iterator = self.udb.db.iterator(*self.args, **self.kwargs)
+            yield from self.iterator
+        finally:
+            self.close()
+    
+    def close(self):
+        self.udb.release()
+        del self.iterator
+        self.iterator = None
 
+    def __del__(self):
+        if self.iterator:
+            self.close()
+        
 class DBUnit(object):
     __slots__ = [
         "default_timeout",
@@ -107,7 +95,6 @@ class DBUnit(object):
         "_auto_release_interval",
         "_auto_releaser",
         "_db",
-        "_releaser_cond",
         "_release_time",
         "_retry_interval"
     ]
@@ -119,8 +106,25 @@ class DBUnit(object):
         self._db = None
         self._retry_interval = retry_interval
         self.lock = Condition()
-        #self._releaser_cond = Condition(lock=self.lock)
         self.default_timeout = default_timeout
+        self.is_closed = False
+        self._auto_releaser = Thread(target=self._auto_release)
+        self._auto_releaser.start()     
+        
+    def __getstate__(self):
+        return {
+            "default_timeout": self.default_timeout,
+            "path": self.path,
+            "_auto_release_interval": self._auto_release_interva,
+            "_retry_interval": self._retry_interval 
+        }
+    
+    def __setstate__(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+        self._release_time = INF_RELEASE_TIME
+        self._db = None
+        self.lock = Condition()
         self.is_closed = False
         self._auto_releaser = Thread(target=self._auto_release)
         self._auto_releaser.start()
@@ -159,7 +163,7 @@ class DBUnit(object):
     @lock_deco
     def _set_release_time(self, release_time, _from_outside=True):
         if release_time == INF_RELEASE_TIME:
-            print('released reservation: Unlimited')
+            #print('released reservation: Unlimited')
             self._release_time = INF_RELEASE_TIME
             return
         if isinstance(release_time, (int, float)):
@@ -169,7 +173,7 @@ class DBUnit(object):
         elif self._release_time == INF_RELEASE_TIME \
             or (release_time > self._release_time and (release_time - self._release_time).seconds > 0.1)\
             or (release_time < self._release_time and (self._release_time - release_time).seconds > 0.1):
-            print('released reservation:  ', release_time)
+            #print('released reservation:  ', release_time)
             self._release_time = release_time
             self.lock.notify()
         else:
@@ -186,11 +190,11 @@ class DBUnit(object):
         return False
             
     def _auto_release(self):
-        print('auto releaser launched')
+        #print('auto releaser launched')
         self.lock.acquire()
         while not self.is_closed:
             rt = self._release_time
-            rt != INF_RELEASE_TIME and print('next release_time:', rt)
+            #rt != INF_RELEASE_TIME and print('next release_time:', rt)
             while self._wait_predicate():
                 if self._release_time != rt:
                     #print('changed from', rt, 'to', self._release_time)
@@ -200,13 +204,16 @@ class DBUnit(object):
             del self._db
             self._db = None
             self._release_time = INF_RELEASE_TIME
-            print('*released')
+            #print('*released')
         self.lock.release()
-        print('auto releaser finished')
+        #print('auto releaser finished')
 
     @property
     def db(self):
         return self._db or {}
+    
+    def _plyvel_db_factory(self):
+        return plyvel.DB(str(self.path), create_if_missing=True)
     
     @lock_deco
     def acquire(self, release_interval=None, timeout=None, _from_outside=True):
@@ -220,9 +227,9 @@ class DBUnit(object):
             # exm = None
             try:
                 if not self.is_acquired(_from_outside=False):
-                    print('try to open database', self.path)
-                    self._db = plyvel.DB(str(self.path), create_if_missing=True)
-                    print('successfully opened db', self.path)
+                    #print('try to open database', self.path)
+                    self._db = self._plyvel_db_factory()
+                    #print('successfully opened db', self.path)
                 self._set_release_time(release_interval, _from_outside=False)
                 return True
             except plyvel.Error as e:
@@ -263,7 +270,7 @@ class DBUnit(object):
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type:
             raise
-        self._set_release_time(self._auto_release_interval)
+        self.release()
 
 
 class LevelDBAcquisitionFailure(Exception):

@@ -1,8 +1,9 @@
-from . import db_unit
-from . import qiterator
-from . import replyvel
+from ._replyvel import DB
+from . import _replyvel as replyvel
 from . import dataset
 from . import tokenizer
+from . import model_core
+from . import ml_models
 
 import traceback
 import os
@@ -16,14 +17,48 @@ import shutil
 import pickle
 
 
-mcode_ptn = re.compile('\d{6}$')
-def iter_mcodes(path):
-    path = Path(path)
-    if mcode_ptn.match(path.name):
-        yield path.name
-    else:
-        for child_path in Path(path).iterdir():
-            yield from iter_mcodes(child_path)
+"""
+# fasttext training
+import subprocess
+import traceback
+vocab_size = 8000
+spm_model_tag = str(vocab_size)
+db_path = Path('./../tokai_db')
+fasttext_path = Path('./../tokai_db/fasttext/')
+reikiset_path = Path('./../reikiset/')
+spm = SPTokenizer(Path(db_path, 'spm',  spm_model_tag))
+tdb = replyvel.dataset.TokenizedJstatutreeDB(db_path, tokenizer=spm)
+
+
+def export_sentence_corpus(source_db, target_path, overwrite=False):
+    if not Path(fasttext_path, 'corpus.text').exists():
+        os.makedirs(fasttext_path, exist_ok=True)
+        with open(Path(fasttext_path, 'corpus.text'), 'w') as f:
+            f.writelines(' '.join(words).rstrip()+'\n' 
+                         for words in tdb.sentence_db.iterator(include_key=False) if len(words)
+                        )
+    
+    
+try:
+    if not Path(fasttext_path, 'model.ft').exists():
+        if not Path(fasttext_path, 'corpus.text').exists():
+            os.makedirs(fasttext_path, exist_ok=True)
+            with open(Path(fasttext_path, 'corpus.text'), 'w') as f:
+                f.writelines(' '.join(words).rstrip()+'\n' 
+                             for words in tdb.sentence_db.iterator(include_key=False) if len(words)
+                            )
+            send_slack('Corpus preparation finished')
+        cp = subprocess.run('/home/jovyan/fastText-0.1.0/fasttext skipgram -input ./corpus.txt -output ./model.ft' ,shell=True, cwd=fasttext_path)
+        cp.check_returncode()
+    send_slack('Model fitting finished')
+except:
+    send_slack(traceback.format_exc())
+    send_slack(cp.stdout)
+    send_slack(cp.stderr)
+"""
+
+
+
 
 class ReplyvelDict(object):
     def __init__(self, path, target_codes='ALL', create_if_missing=True):

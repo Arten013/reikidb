@@ -1,5 +1,5 @@
-from . import db_unit
-from . import qiterator
+from .utils import db_unit
+from .utils import qiterator
 
 import traceback
 import os
@@ -12,14 +12,33 @@ from queue import Queue
 import shutil
 import pickle
 
+"""
+def db_freezer(*dbs):
+    def _db_freezer(func):
+        def wrapper(self, *args, **kwargs):
+            for db in dbs:
+                db.
+"""
+
 class DB(object):
-    def __init__(self, basepath, target_codes='ALL', auto_release_interval=60, db_acquire_timeout=5):
+    def __init__(self, basepath, target_codes='ALL', auto_release_interval=3, db_acquire_timeout=5):
         self.basepath = Path(basepath)
         self.target_mcode_ptns = self._get_mcode_ptns(target_codes)
         self._auto_release_interval = auto_release_interval
         self._db_acquire_timeout = db_acquire_timeout
         self._db_cache = dict()
 
+    def get_subdb(self, target_codes):
+        for code in target_codes:
+            if not self._code_ptn_match(code):
+                raise ValueError('Invalid code: '+str(code))
+        return DB(self.basepath, target_codes, self._auto_release_interval, self._db_acquire_timeout)
+        
+    def suspend_releaser(self):
+        self._auto_release_interval = db_unit.INF_RELEASE_TIME
+        for v in self._db_cache.values():
+            v.suspend_releaser()
+        
     @staticmethod
     def _get_mcode_ptns(codes):
         if codes == 'ALL':
@@ -31,7 +50,7 @@ class DB(object):
             elif re.match('\d{6}$', code):
                 ptns.append(re.compile(code))
         return ptns
-        
+
     def __len__(self):
         return sum(1 for _ in self.iterator(include_key=False, include_value=False))
         
@@ -41,8 +60,11 @@ class DB(object):
     def remove_files(self):
         shutil.rmtree(self.basepath)
     
-    def _code_ptn_match(self, code):
-        for ptn in self.target_mcode_ptns:
+    def _code_ptn_match(self, code, ptns=None):
+        ptns = ptns or self.target_mcode_ptns
+        if ptns =='ALL':
+            return True
+        for ptn in ptns:
             if ptn.match(code):
                 return True
         return False
@@ -80,7 +102,7 @@ class DB(object):
         db = self.get_db(mcode)
         value = db.get(item_key, default=None)
         if value is None:
-            print('replyvel get (return default):', key)
+            #print('replyvel get (return default):', key)
             return default
         ret = self._decode_value(value)
         return ret
@@ -130,9 +152,10 @@ class DB(object):
         else:
             return lambda mcode, value: None
     
-    def iterator(self, include_key=True, include_value=True):
+    def iterator(self, include_key=True, include_value=True, target_codes=None):
         task_queue = Queue()
-        for mcode in sorted(self.mcodes, key=lambda x:int(x)):
+        target_mcode_ptns = self._get_mcode_ptns(target_codes) if target_codes else None
+        for mcode in sorted([mc for mc in self.mcodes if self._code_ptn_match(mc, ptns=target_mcode_ptns)], key=lambda x:int(x)):
             task_queue.put(mcode)
         unpacker = self._get_item_unpacker(include_key, include_value)
         while not task_queue.empty():

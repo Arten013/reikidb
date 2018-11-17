@@ -71,7 +71,11 @@ class Iterator(object):
     def __iter__(self):
         #if not self.udb.releaser_is_suspended():
         try:
-            self.udb.suspend_releaser()
+            if self.udb.is_acquired():
+                self.udb.suspend_releaser()
+            else:
+                while not self.udb.acquire(release_interval=INF_RELEASE_TIME):
+                    pass
             self.iterator = self.udb.db.iterator(*self.args, **self.kwargs)
             yield from self.iterator
         finally:
@@ -99,7 +103,7 @@ class DBUnit(object):
         "_retry_interval"
     ]
     
-    def __init__(self, path, auto_release_interval=5, retry_interval=0.1, default_timeout=1):
+    def __init__(self, path, auto_release_interval=5, retry_interval=0.1, default_timeout=5):
         self.path = Path(path)
         self._auto_release_interval = auto_release_interval
         self._release_time = INF_RELEASE_TIME
@@ -115,7 +119,7 @@ class DBUnit(object):
         return {
             "default_timeout": self.default_timeout,
             "path": self.path,
-            "_auto_release_interval": self._auto_release_interva,
+            "_auto_release_interval": self._auto_release_interval,
             "_retry_interval": self._retry_interval 
         }
     
@@ -256,7 +260,7 @@ class DBUnit(object):
         return self.db.delete(key)
 
     @load_leveldb_deco(release_interval=INF_RELEASE_TIME)
-    def iterator(self, include_key, include_value):
+    def iterator(self, include_key=True, include_value=True):
         return Iterator(self, include_key=include_key, include_value=include_value)
 
     @load_leveldb_deco(release_interval=INF_RELEASE_TIME)

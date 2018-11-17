@@ -14,143 +14,39 @@ from jstatutree.etypes import ETYPES, code2etype, code2jname, CATEGORY_TEXT
 from jstatutree.lawdata import ReikiCode
 from multiprocessing import cpu_count
 
-from . import replyvel
+from . import _replyvel as replyvel
 
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, TfidfTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import TruncatedSVD
 from sklearn.pipeline import Pipeline
 from sklearn.neighbors import NearestNeighbors
+from sklearn.externals import joblib
 import numpy as np
 import pickle
 
-class JstatutreeLSI(object):
-    def __init__(self, tdb, tag, vocab_size=16000, idf=True, size=500, unit='XSentence'):
-        assert hasattr(tdb, 'tokenizer'), 'TokenizedJstatutreeDB required'
-        self.db = tdb
-        self.tag = tag
-        self.vecs = replyvel.DB(self.path, target_codes=self.db.target_codes)
-        self.vocab_size = vocab_size
-        self.idf = idf
-        self.size = size
-        self.unit = unit
-        self.transformer = self.construct_transformer()
-        self.tag_idx_dict = {}
-        self.tags = []
-        self.matrix = None
-    
-    def remove_files(self):
-        shutil.rmtree(self.path)
-    
-    def construct_transformer(self):
-        count_vectorizer = CountVectorizer(
-            input='content',
-            #max_df=0.5, 
-            #min_df=1, 
-            lowercase = False,
-            max_features=self.vocab_size
-            )
-        steps = [('CountVectorize', count_vectorizer)]
-        if self.idf:
-            steps.append(("TfidfTransform", TfidfTransformer()))
-        steps.append(
-                    ( 
-                        "TruncatedSVD",
-                        TruncatedSVD(n_components=self.size, algorithm='randomized', n_iter=10, random_state=42)
-                    )
-        )
-        return Pipeline(steps)
-    
-    def load_matrix(self):
-        with open(Path(self.path, 'matrix.npy'), "rb") as f:
-            self.matrix = np.load(f)
-        with open(Path(self.path, 'tags.pkl'), "rb") as f:
-            self.tags = pickle.load(f)
-        with open(Path(self.path, 'tag_idx_dict.pkl'), "rb") as f:
-            self.tag_idx_dict = pickle.load(f)
-    
-    def most_similar(self, query_matrix, topn=10, name_as_tag=True, append_text=False):
-        if self.matrix is None:
-            self.load_matrix()
-        distances_array, indice_array = NearestNeighbors(n_neighbors=topn, metric='cosine', algorithm='brute').fit(self.matrix).kneighbors(query_matrix)
-        ret = []
-        for dl, il in zip(distances_array.tolist(), indice_array.tolist()):
-            dl = [round(d, 3) for d in dl]
-            item = zip([self.tags[i] for i in il], [round(d, 3) for d in dl])
-            if append_text:
-                item = (
-                    (t, d, ''.join([w for s in self.db.get_element(t).itersentence() for w in s]))
-                    for t, d in item)
-            if name_as_tag:
-                item = ((self.db.get_element_name(x[0], x[0]), *x[1:]) for x in item)
-            ret.append(list(item))
-        return ret
-    
-    def most_similar_by_keys(self, keys, *args, **kwargs):
-        ukeys = []
-        for key in (keys if isinstance(keys, list) else [keys]):
-            print(key)
-            try:
-                tree = self.db.get_jstatutree(key, None)
-                if tree:
-                    elem = tree._root
-                assert tree
-            except:
-                elem = self.db.get_element(key, None)
-                assert elem, 'invalid key: '+str(key)
-            if self.unit == 'XSentence':
-                ukeys.extend([c for c, _ in elem.iterXsentence(include_code=True)])
-            else:
-                ukeys.extend([c for c, _ in elem.iterfind('.//{unit}'.format(unit=self.unit))])
-        return self.most_similar(np.matrix([self.vecs.get(k) for k in ukeys]), *args, **kwargs)
 
-    def reg_matrix_idx(self, i, key, words):
-        self.tag_idx_dict[key] = i
-        self.tags.append(key)
-        return words
-    
-    def _calc_vec(self, text):
-        if isinstance(text, str):
-            text = self.db.tokenizer(text)
-        return self.transformer.transform(text)
-    
-    def fit(self):
-        if Path(self.path, 'matrix.npy').exists():
-            print('model already exists.')
-            return
+class SentenceGenerator(object):
+    def __init__(self, db, unit, include_key=False):
+        self.db = db
+        self.unit = unit
+        self.include_key = include_key
+
+    def export_corpus(self, path, workers=None):
+        # todo: complete this function
+        workers = workers or cpu_count()
+        with concurrent.futures.ProcessPoolExecutor(workers) as executor:
+            vectors = np.vstack([v for t, v in executor.map(self._vector_production, [db for c, db in self.db.split_by_dbcount(self.workers)]   ) if not tags.extend(t)])
+        
+    def __iter__(self):
         if self.unit == 'XSentence':
             sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.iterXsentence(include_code=True) if v is not None and len(v) > 0)
         else:
-            sg = self.db.iter_element_sentences(self.unit, include_tag=True)
-        self.matrix = self.transformer.fit_transform(
-            (
-                " ".join(self.reg_matrix_idx(i, key, words))
-                for i, (key, words) in enumerate(sg)
-            )
-        )
-        with self.vecs.write_batch() as wb:
-            for tag in self.tags:
-                wb.put(tag, self.matrix[self.tag_idx_dict[tag]])
-        with open(Path(self.path, 'matrix.npy'), "wb") as f:
-            np.save(f, self.matrix)
-        with open(Path(self.path, 'tags.pkl'), "wb") as f:
-            pickle.dump(self.tags, f)
-        with open(Path(self.path, 'tag_idx_dict.pkl'), "wb") as f:
-            pickle.dump(self.tag_idx_dict, f)
-        
-    @property
-    def path(self):
-        return Path(self.db.path, 'tfidf', self.tag)
-    
-    def get(self, key, default=None):
-        ret = self.vecs.get(key, None)
-        if ret is not None:
-            return ret
-        e = self.db.get_element(key, None)
-        if e is None:
-            return default
-        words = [w for s in e.itersentences() for w in s]
-        return self._calc_vec(text)
+            sg =  ((k, v) for k, v in self.db.iter_element_sentences(self.unit, include_tag=True) if v is not None and len(v) > 0)
+        if self.include_key:
+            yield from sg
+        else:
+            yield from (v for k, v in sg)
     
 class JstatutreeDB(object):
     def __init__(self, path, target_codes='ALL'):
@@ -170,13 +66,28 @@ class JstatutreeDB(object):
         shutil.rmtree(self.path)
     
     def get_subdb(self, target_codes):
+        for code in target_codes:
+            if not self.jstatutree_db._code_ptn_match(code):
+                raise ValueError('Invalid code: '+str(code))
         return JstatutreeDB(self.path, target_codes)
     
     def split_by_pref(self):
-        return [ (pcode, self.get_subdb(mcodes)) for pcode, mcodes in groupby(self.mcodes, lambda x: x[:2])]
+        return [ (pcode, self.get_subdb(list(mcodes))) for pcode, mcodes in groupby(sorted(self.mcodes, key=lambda x: int(x)), key=lambda x: x[:2])]
     
     def split_by_muni(self):
         return [(mcode, self.get_subdb([mcode])) for mcode in self.mcodes]
+    
+    def split_by_dbcount(self, dbcount):
+        db_size = ( len(list(self.mcodes)) + (dbcount-1))//dbcount
+        return self.split_by_dbsize(dbsize)
+
+    def split_by_dbsize(self, dbsize):
+        entire_mcodes = sorted(self.mcodes, key=lambda x: int(x))
+        step_size = dbsize
+        return [(mcodes, self.get_subdb(mcodes))
+                    for i in range(0, len(entire_mcodes), step_size)
+                    for mcodes in [ entire_mcodes[i:i+step_size] ]
+                ]
     
     def get_analyzer(self, workers=None):
         return JstatutreeDBAnalyzer(self, workers)
@@ -219,13 +130,19 @@ class JstatutreeDB(object):
         elem._children = [self.get_element(child_code, None) for child_code in list(elem)]
         return elem
     
-    def iter_lawcodes(self):
-        yield from self.jstatutree_db.iterator(include_key=True, include_value=False)
+    def iter_lawcodes(self, target_codes=None):
+        yield from self.jstatutree_db.iterator(include_key=True, include_value=False, target_codes=target_codes)
 
     def __len__(self):
         return sum(1 for v in self.iter_lawcodes())
- 
+    
     def iter_elements(self, target_etype, include_tag=True):
+        for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
+            yield self._complete_element(elem)
+            
+    def iter_elements(self, target_etype, include_tag=True):
+        #if target_etype == 'Xsentence':
+        #    yield from self.iter_Xsentence(self, )
         for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
             yield self._complete_element(elem)
             
@@ -236,10 +153,10 @@ class JstatutreeDB(object):
                 ret += self.sentence_db.get(s.code)
             yield (elem.code, ret) if include_tag else ret
             
-    def iter_jstatutree(self, include_tag=True, include_value=True):
+    def iter_jstatutree(self, include_tag=True, include_value=True, target_codes=None):
         if not include_value:
-            return self.iter_lawcodes()
-        for jst in self.jstatutree_db.iterator(include_key=False, include_value=True):
+            return self.iter_lawcodes(target_codes=target_codes)
+        for jst in self.jstatutree_db.iterator(include_key=False, include_value=True, target_codes=target_codes):
             jst._root = self.get_element(jst._root)
             yield (str(jst.lawdata.code), jst) if include_tag else jst
     
@@ -266,13 +183,15 @@ class JstatutreeDB(object):
                             print(e)
                 except ET.ParseError as e:
                     print_log and print('skip (Parse Error):', path)
+                except Exception as e:
+                    raise e
 
 class MultiProcWriter(object):
     def __init__(self, db_path, target_codes='ALL', workers=None, tokenizer=None):
         if tokenizer:
-            self.db = TokenizedJstatutreeDB(db_path, tokenizer, target_codes)
+            self.db = TokenizedJstatutreeDB(path=db_path, tokenizer=tokenizer, target_codes=target_codes)
         else:
-            self.db = JstatutreeDB(db_path, target_codes)
+            self.db = JstatutreeDB(path=db_path, target_codes=target_codes)
         self.workers=workers or cpu_count()
         
     def write_batch_pref_set(self, prefs_path, print_log=False, error_detail=True, print_skip=True, only_reiki=True, *wbargs, **wbkwargs):
@@ -283,64 +202,47 @@ class MultiProcWriter(object):
         with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
             futures = []
             for muni_path in Path(pref_path).iterdir():
-                print('submit path:', muni_path)
-                futures.append(
-                    executor.submit(
-                        self.db.get_subdb( [muni_path.name] ).write_batch_muni,
-                        muni_path, 
-                        print_log,
-                        error_detail,
-                        print_skip,
-                        only_reiki, 
-                        *wbargs,
-                        **wbkwargs
+                mcode = Path(muni_path).name
+                try:
+                    subdb = self.db.get_subdb( [mcode])
+                    print('submit path:', muni_path)
+                    futures.append(
+                        executor.submit(
+                            subdb.write_batch_muni,
+                            muni_path, 
+                            print_log,
+                            error_detail,
+                            print_skip,
+                            only_reiki, 
+                            *wbargs,
+                            **wbkwargs
+                        )
                     )
-                )
+                    if len(futures) > 30:
+                        while len(futures) > 20:
+                            _, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                        futures = list(futures)
+                except ValueError:
+                    pass
+                except:
+                    raise
             concurrent.futures.wait(futures)
             
     def tokenize_batch(self, *wbargs, **wbkwargs):
         assert isinstance(self.db, TokenizedJstatutreeDB), 'No tokenizer'
-        workers = workers or cpu_count()
-        with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
-            futures = []
-            for muni_db in self.db.split_by_muni():
-                print('submit mcode:', list(muni_db.mcodes)[0])
-                futures.append(executor.submit(muni_db.tokenize_batch, *wbargs, **wbkwargs))
-            concurrent.futures.wait(futures)
+        executor = concurrent.futures.ProcessPoolExecutor(self.workers)
+        futures = []
+        for mcode, muni_db in self.db.split_by_muni():
+            print('submit mcode:', mcode)
+            futures.append(executor.submit(muni_db.tokenize_batch, *wbargs, **wbkwargs))
+            if len(futures) > 30:
+                print('wait for finishing tasks ...')
+                executor.shutdown(wait=True)
+                executor = concurrent.futures.ProcessPoolExecutor(self.workers)
+                print('restart')
+                futures = []
+        executor.shutdown(wait=True)
 
-import pandas as pd
-class JstatutreeDBAnalyzer(object):
-    def __init__(self, db, workers=None):
-        self.db = db
-        self.workers = workers
-        
-    def element_count(self, ignore_zero=True):
-        df = pd.DataFrame(columns=["count"], )
-        with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
-            futures = {}
-            for ename, edb in self.db.element_db.items():
-                futures[ename] = executor.submit(len, edb)
-            concurrent.futures.wait(futures.values())
-            for ename in [e.__name__ for e in ETYPES]:
-                value = futures[ename].result()
-                if ignore_zero and value == 0:
-                    continue
-                df.loc[ename, "count"] = value
-        return df.astype("int32")
-    
-    def text_keywords_search(self, keywords, etype=None, include_value=True):
-        generator = self.db.iter_element_sentences(etype, True, True) if etype else self.db.iter_tokenized_sentences(include_tag=True)
-        for tag, words in generator:
-            for kw in keywords:
-                if kw not in text:
-                    yield (tag, words) if include_value else tag
-     
-    def name_keywords_search(self, keywords):
-        for tag, jstree in self.jstatutree_db.iterator(include_key=True, include_value=True):
-            for kw in keywords:
-                if kw not in jstree.lawdata.name:
-                    yield tag
-    
 class TokenizedJstatutreeDB(JstatutreeDB):
     def __init__(self, path, tokenizer, target_codes='ALL'):
         super().__init__(path, target_codes)
@@ -383,9 +285,9 @@ class TokenizedJstatutreeDB(JstatutreeDB):
             elem.text = self.sentence_db.get(elem.code, elem.text)
         return elem
     
-    def iter_elements(self, target_etype, include_tag=True):
-        for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
-            yield self._complete_element(elem)
+    #def iter_elements(self, target_etype, include_tag=True):
+    #    for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
+    #        yield self._complete_element(elem)
     
     def iter_element_sentences(self, target_etype, include_tag=True):
         for elem in self.iter_elements(target_etype, False):
@@ -419,3 +321,38 @@ class JstatutreeBatchWriter(object):
         for v in self.element_db.values():
             v.write()
         self.sentence_db and self.sentence_db.write()
+
+import pandas as pd
+class JstatutreeDBAnalyzer(object):
+    def __init__(self, db, workers=None):
+        self.db = db
+        self.workers = workers
+        
+    def element_count(self, ignore_zero=True):
+        df = pd.DataFrame(columns=["count"], )
+        with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
+            futures = {}
+            for ename, edb in self.db.element_db.items():
+                futures[ename] = executor.submit(len, edb)
+            concurrent.futures.wait(futures.values())
+            for ename in [e.__name__ for e in ETYPES]:
+                value = futures[ename].result()
+                if ignore_zero and value == 0:
+                    continue
+                df.loc[ename, "count"] = value
+        return df.astype("int32")
+    
+    def text_keywords_search(self, keywords, etype=None, include_value=True):
+        generator = self.db.iter_element_sentences(etype, True, True) if etype else self.db.iter_tokenized_sentences(include_tag=True)
+        for tag, words in generator:
+            for kw in keywords:
+                if kw not in text:
+                    yield (tag, words) if include_value else tag
+     
+    def name_keywords_search(self, keywords):
+        for tag, jstree in self.jstatutree_db.iterator(include_key=True, include_value=True):
+            for kw in keywords:
+                if kw not in jstree.lawdata.name:
+                    yield tag
+    
+        

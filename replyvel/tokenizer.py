@@ -3,6 +3,7 @@ import os
 import MeCab
 import shutil
 from pathlib import Path
+import subprocess
 try:
     import sentencepiece as spm
 except:
@@ -43,9 +44,10 @@ class MecabTokenizer(Tokenizer):
 class SPTokenizer(Tokenizer):
     def __init__(self, model_path):
         self.model_path = Path(model_path)
-        self.tag = self.path.name
+        self.tag = self.model_path.name
+        self.spm = None
     
-    def __setstate__(self):
+    def __getstate__(self):
         d = self.__dict__
         d["spm"] = None
         return d
@@ -57,13 +59,28 @@ class SPTokenizer(Tokenizer):
     @staticmethod
     def load_spm(model_path):
         sp = spm.SentencePieceProcessor()
-        sp.load(model_path)
+        path = Path(model_path, 'model.model')
+        assert path.exists(), 'spm model {} does not exist.'.format(path)
+        sp.load(str(path))
+        assert spm, 'model load failure. '+str(path)
         return sp
     
     @staticmethod
     def train(corpus_path, save_path, vocab_size, overwrite=False):
-        assert (not overwrite) and Path(save_path).exists(), 'Model already exists'
-        os.makedirs(self.model_path, exist_ok=True)
-        spm.SentencePieceTrainer.Train('--input={} --model_prefix=model --vocab_size={}'.format(corpus_path, vocab_size))
-        shutil.move('./model.model', self.model_path)
-        shutil.move('./model.vocab', vocab_path)
+        assert overwrite or not Path(save_path, 'model.model').exists(), 'Model already exists'
+        save_path = str(Path(save_path).resolve())
+        corpus_path  = str(Path(corpus_path).resolve())
+        os.makedirs(save_path, exist_ok=True)
+        try:
+            cp = subprocess.run(
+                'spm_train --input={} --model_prefix=model --vocab_size={}'.format(corpus_path, vocab_size), 
+                shell=True, 
+                cwd=save_path, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE
+            )
+            cp.check_returncode()
+        except:
+            print(cp.stdout.decode())
+            print(cp.stderr.decode())
+            shutil.rmtree(save_path)

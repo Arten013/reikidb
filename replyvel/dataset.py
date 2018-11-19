@@ -37,7 +37,7 @@ class SentenceGenerator(object):
         workers = workers or cpu_count()
         with concurrent.futures.ProcessPoolExecutor(workers) as executor:
             vectors = np.vstack([v for t, v in executor.map(self._vector_production, [db for c, db in self.db.split_by_dbcount(self.workers)]   ) if not tags.extend(t)])
-        
+    
     def __iter__(self):
         if self.unit == 'XSentence':
             sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.iterXsentence(include_code=True) if v is not None and len(v) > 0)

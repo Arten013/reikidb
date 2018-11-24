@@ -4,7 +4,11 @@ import shutil
 import concurrent
 import numpy as np
 import pickle
+import math
+import traceback
 import gensim
+
+from . import _replyvel as replyvel
 
 from pathlib import Path
 from multiprocessing import cpu_count
@@ -12,50 +16,18 @@ from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, Tf
 from sklearn.decomposition import TruncatedSVD
 from sklearn.pipeline import Pipeline
 
-from .model_core import JstatutreeModelCore. JstatutreeVectorModelBase, ScikitModelBase
+from .model_core import JstatutreeModelCore, JstatutreeVectorModelBase, ScikitModelBase
 from .dataset import SentenceGenerator
 from concurrent.futures import ProcessPoolExecutor
 import simstring
 import hashlib
+from .policy_match import PolicyMatchFactory
 
-
-class LSI(TfIdf):
-    MODEL_TYPE_TAG = 'lsi'
-    def __init__(self, tdb, tag, vocab_size=16000, idf=True, vector_size=300, unit='XSentence'):
-        super().__init__(tdb, tag, vector_size, unit)
-        self.vocab_size = vocab_size
-        self.idf = idf
-        count_vectorizer = CountVectorizer(
-            input='content',
-            #max_df=0.5, 
-            #min_df=1, 
-            lowercase = False,
-            max_features=self.vocab_size
-            )
-        steps = [('CountVectorize', count_vectorizer)]
-        steps.append(("TfidfTransform", TfidfTransformer(use_idf=idf)))
-        self.steps.append((
-            "TruncatedSVD",
-            TruncatedSVD(
-                n_components=self.vector_size,
-                algorithm='randomized', 
-                n_iter=10, 
-                random_state=42
-                )
-            )
-        )
-        self.transformer = Pipeline(steps)
-
-    def get_submodel(self, *mcodes):
-        submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.vocab_size, self.idf, self.vector_size, self.unit)
-        submodel.reload_tagged_vectors()
-        submodel.transformer = self.transformer
-        return submodel
 
 class TfIdf(ScikitModelBase):
     MODEL_TYPE_TAG = 'tfidf'
-    def __init__(self, tdb, tag, vocab_size=8000, idf=True, unit='XSentence'):
-        super().__init__(tdb, tag, vocab_size, unit)
+    def __init__(self, db, tag, vocab_size=8000, idf=True, unit='XSentence'):
+        super().__init__(db, tag, vocab_size, unit, vector_type='scipy_sparse_matrix')
         self.vocab_size = vocab_size
         self.idf = idf
         count_vectorizer = CountVectorizer(
@@ -71,12 +43,48 @@ class TfIdf(ScikitModelBase):
 
     def get_submodel(self, *mcodes):
         submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.vocab_size, self.idf, self.unit)
-        submodel.reload_tagged_vectors()
+        if len(self.tagged_vectors):
+            submodel.reload_tagged_vectors()
+        submodel.transformer = self.transformer
+        return submodel
+
+    
+class LSI(ScikitModelBase):
+    MODEL_TYPE_TAG = 'lsi'
+    def __init__(self, db, tag, vocab_size=16000, idf=True, vector_size=300, unit='XSentence'):
+        super().__init__(db, tag, vector_size, unit)
+        self.vocab_size = vocab_size
+        self.idf = idf
+        count_vectorizer = CountVectorizer(
+            input='content',
+            #max_df=0.5, 
+            #min_df=1, 
+            lowercase = False,
+            max_features=self.vocab_size
+            )
+        steps = [('CountVectorize', count_vectorizer)]
+        steps.append(("TfidfTransform", TfidfTransformer(use_idf=idf)))
+        steps.append((
+            "TruncatedSVD",
+            TruncatedSVD(
+                n_components=self.vector_size,
+                algorithm='randomized', 
+                n_iter=10, 
+                random_state=42
+                )
+            )
+        )
+        self.transformer = Pipeline(steps)
+
+    def get_submodel(self, *mcodes):
+        submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.vocab_size, self.idf, self.vector_size, self.unit)
+        if len(self.tagged_vectors):
+            submodel.reload_tagged_vectors()
         submodel.transformer = self.transformer
         return submodel
 
 
-class FastText(JstatutreeModel):
+class FastText(JstatutreeVectorModelBase):
     MODEL_TYPE_TAG = 'fasttext'
     def __init__(self, tdb, tag, wvmodel_path, vector_size=None, unit='XSentence', workers=None):
         self.wvmodel_path = wvmodel_path
@@ -206,51 +214,111 @@ class FastText(JstatutreeModel):
         print('Model fitting complete!')
         self.save()
 
+        
+class ReverseSentenceDB(replyvel.DB):
+    @classmethod
+    def sentence_hash(cls, x):
+        return hashlib.md5(x.encode()).digest()
+    
+    @classmethod
+    def _encode_key(cls, x):
+        mcode, sent = x
+        return mcode, cls.sentence_hash(sent)
+        
+    @classmethod
+    def _decode_key(cls, mcode, sent):
+        #print('decode:', mcode, sent)
+        return (mcode, sent)
+        
 class SimString(JstatutreeModelCore):
-    def __init__(self, db, tag, unit='XSentence', ngram=3, method=simstring.cosine):
-        assert hasattr(db, 'tokenizer'), 'TokenizedJstatutreeDB required'
+    MODEL_TYPE_TAG = 'simstring'
+    def __init__(self, db, tag, unit='XSentence', ngram=3, method=simstring.cosine, workers=None):
+        assert not hasattr(db, 'tokenizer'), 'Normal JstatutreeDB required'
         super().__init__(db, tag, unit)
         self.method = method
-        self.reverse_unitdb = replyvel.DB(Path(self.path, 'reverse_unitdb.rpl'), target_codes=self.db.target_codes)
-        self.reverse_unitdb._encode_key = lambda x: x
-        self.reverse_unitdb._decode_key = lambda x: x
+        self.ngram = ngram
+        self.workers = workers or cpu_count()
+        self.reverse_unitdb = ReverseSentenceDB(Path(self.path, 'reverse_unitdb.rpl'), target_codes=self.db.target_codes)
         self.simstring_path = Path(self.path, 'simstring', '{}-gram'.format(ngram)).resolve()
+        self.rspace_reversed_dict = None
         if self.simstring_path.exists():
             self.simstring = dict()
         else:
             self.simstring = None
 
-    hash_sentence = lambda x: hashlib.md5(x).digest()
-
+    def policy_matching(self, keys, theta, activation_func, topn=10, **kwargs):
+        match_factory = PolicyMatchFactory([self.db.get_element(k) for k in keys], theta, activation_func)
+        if self.rspace_reversed_dict is None:
+            self.restrict_rspace(self.db.mcodes)
+        simstrings = {mcode: simstring.reader(str(Path(self.simstring_path, mcode, 'db'))) 
+                for mcode in (self.rspace_codes or self.db.mcodes) if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
+        for ss in simstrings.values():
+            ss.measure = self.method
+            ss.theta = theta
+        usents = {uk:''.join(self.db.get_element(uk).itersentence()) for uk in self.keys_to_ukeys(*keys)}
+        rankings = []
+        for qkey, qsent in usents.items():
+            #print(qkey)
+            [match_factory.add_leaf(qkey, skey, sim, cip=1.0)
+                    for ss in simstrings.values()
+                    for sent in ss.retrieve(qsent)
+                    for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), [])
+                    for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
+                ]
+        return match_factory.construct_matching_object(tree_factory = self.db.get_jstatutree)
+            
+    @staticmethod
+    def get_ngram_set(s, n):
+        s = '▁'*(n-1) + s + '▁'*(n-1)
+        return set([s[i:i+n] for i in range(len(s)-(n-1))])
+    
+    def calc_similarity(self, x, y):
+        if self.method == simstring.cosine:
+            return round([ len(nx&ny) / math.sqrt( len(nx)*len(ny) )  for nx in [self.get_ngram_set(x, self.ngram)] for ny in [self.get_ngram_set(y, self.ngram)] ][0], 3)
+    
     def _fit_unit_task(self, mcodes):
         pid = os.getpid()
-        print('<proc {}>'.format(pid), 'task begin', db.mcodes)
-        for mcode in mcodes
+        print('<proc {}>'.format(pid), 'task begin', mcodes)
+        for mcode in mcodes:
             subsimstring_path = Path(self.simstring_path, mcode)
             subdb = self.reverse_unitdb.get_subdb([mcode])
             subsimstring = None
             if not subsimstring_path.exists():
-                os.path.mkdirs(subsimstring_path)
+                os.makedirs(str(subsimstring_path))
                 subsimstring = simstring.writer(str(Path(subsimstring_path, 'db')))
             insert_dict = None
-            if len(subdb) = 0:
+            if len(subdb) == 0:
                 insert_dict = {}
             if subsimstring is None and insert_dict is None:
                 print('<proc {}>'.format(pid), 'skip muni', mcode)
                 continue
             for k, s in SentenceGenerator(self.db.get_subdb([mcode]), self.unit, include_key=True):
                 if insert_dict is not None:
-                    hs = self.hash_sentence(s)
-                    val = self.insert_dict.get(hs, [])
+                    key = mcode+s
+                    val = insert_dict.get(key, [])
                     val.append(k)
-                    self.insert_dict[hs] = val
+                    insert_dict[key] = val
                 subsimstring is None or subsimstring.insert(s)
             if insert_dict is not None:
-                with subdb.write_batch as wb:
-                    for k, v in insert_dict.values():
-                        wb.put(k, v)
+                with subdb.write_batch(sync=True, transaction=True) as wb:
+                    for k, v in insert_dict.items():
+                        wb.put((k[:6], k[6:]), v)
         return mcodes
 
+    def restrict_rspace(self, rspace_codes):
+        if self.rspace_reversed_dict is not None and set(self.rspace_codes) == set(rspace_codes):
+            return 
+        self.rspace_codes = rspace_codes
+        self.rspace_reversed_dict = {}
+        for mdb in self.reverse_unitdb.get_subdb(self.rspace_codes).split_unit():
+            for (mcode, sentence_hash), code in mdb.iterator():
+                val = self.rspace_reversed_dict.get(sentence_hash, None)
+                if val is None:
+                    val = code
+                else:
+                    val.extend(code)
+                self.rspace_reversed_dict[sentence_hash] = val
+    
     def fit(self, task_size=None):
         print('Training begin')
 
@@ -265,31 +333,35 @@ class SimString(JstatutreeModelCore):
         print('workers:', self.workers)
 
         with ProcessPoolExecutor(self.workers) as executor:
-            futures = [executor.submit(self._fit_unit_task, target_mcodes[i:i+task_size]) for i in range(0, len(target_mcodes), task_size) if not print('submit:',target_mcodes[i:i+task_size])]
+            futures = [executor.submit(self._fit_unit_task, target_mcodes[i:i+task_size]) for i in range(0, len(target_mcodes), task_size) if """not print('submit:',target_mcodes[i:i+task_size])"""]
             for done_mcodes in concurrent.futures.as_completed(futures):
                 finished_mcodes +=done_mcodes.result()
                 print('model construction progress: {0}%'.format(100*len(finished_mcodes)//task_num))
         print('Model fitting complete!')
         self.save()
     
-    def most_similar_by_keys(self, keys, topn, init_threshold=0.7):
-        simstrings = {mcode: simstring.reader(str(Path(self.simstring_path, mcode))) 
-                for mcode in self.rspace_codes or self.db.mcodes}
+    def most_similar_by_keys(self, keys, topn, init_threshold=0.7, **kwargs):
+        if self.rspace_reversed_dict is None:
+            self.restrict_rspace(self.db.mcodes)
+        simstrings = {mcode: simstring.reader(str(Path(self.simstring_path, mcode, 'db'))) 
+                for mcode in (self.rspace_codes or self.db.mcodes) if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
         for ss in simstrings.values():
             ss.measure = self.method
-        usents = {uk:''.join(self.db.get_element(uk)).itersentence() for uk in self.keys_to_ukeys(keys)}
+        usents = {uk:''.join(self.db.get_element(uk).itersentence()) for uk in self.keys_to_ukeys(*keys)}
         rankings = []
-        for qkeys, qsents in usents.items():
+        for qkey, qsent in usents.items():
             results = []
             th = init_threshold
-            while len(results) < topn and th >= 0
+            while len(results) < topn and th >= 0:
+                #print(qkey, th, len(results))
                 ss.threshold = th
-                results = [(skey, sim)
+                results = [(skey, 1-sim)
                         for ss in simstrings.values()
-                        for sent in ss.retrieve(qsent)
-                        for skey in self.reverse_unitdb.get(sent, [])
-                        for sim in [self.calc_similarity(qsent, sent)] if sim > threshold
+                        for retrieved in [ss.retrieve(qsent)] if len(retrieved) >= topn
+                        for sent in retrieved
+                        for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), [])
+                        for sim in [self.calc_similarity(qsent, sent)]
                     ]
                 th -= 0.05
-            rankings.append(qtag, sorted(results, key=lambda x: -x[1])[:topn])
+            rankings.append([qkey, sorted(results, key=lambda x: -x[1])[:topn]])
         return rankings

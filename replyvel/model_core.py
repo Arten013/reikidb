@@ -8,33 +8,52 @@ from sklearn.externals import joblib
 import numpy as np
 import pickle
 import math
+from multiprocessing import cpu_count
 
-from policy_match import PolicyMatchObject
+from .policy_match import PolicyMatchFactory
 from . import _replyvel as replyvel
+from .dataset import SentenceGenerator
+from scipy import cluster, spatial, sparse
 
 class TaggedVectors(object):
-    def __init__(self, vector_size):
+    def __init__(self, vector_size, vector_type='numpy_array'):
+        self.vector_type = vector_type
         self.vector_size = vector_size
         self.tagged_indice = {}
         self.indexed_tags = []
         self.vectors = None
+        self.clusters = None
     
     def _add_tags(self, *tags):
         for tag in tags:
             self.tagged_indice[tag] = len(self.indexed_tags)
             self.indexed_tags.append(tag)
     
+    def vstack(self, vectors):
+        if self.vector_type == 'numpy_array':
+            return np.vstack(vectors)
+        elif self.vector_type == 'scipy_sparse_matrix':
+            return sparse.vstack(vectors)
+        raise Exception('Invalid vector_type '+str(self.vector_type))
+    
     def add(self, vec, tag):
         self.add_tag(tag)
-        self.vectors = np.vstack([self.vectors, vec]) if self.vectors is not None else vec
-    
+        self.vectors = self.vstack([self.vectors, vec]) if self.vectors is not None else vec
+        
+    """
     def add_from_tags_and_vectors(self, tags, vectors):
         self.vectors = np.vstack([self.vectors, vectors]) if self.vectors is not None else vectors
         self._add_tags(*tags)
+    """
+    
+    def get_vectors(self, keys):
+        return self.vectors[[self.tagged_indice[k] for k in keys]]
     
     def add_from_keyed_vectors(self, iterator):
-        additional_vectors = np.array([vec for tag, vec in iterator if (self._add_tags(tag) or True)])
-        self.vectors = np.vstack([self.vectors, additional_vectors]) if self.vectors is not None else additional_vectors
+        additional_vectors = [vec for tag, vec in iterator if (self._add_tags(tag) or True)]
+        if len(additional_vectors) == 0:
+            return 
+        self.vectors = self.vstack([self.vectors, self.vstack(additional_vectors)]) if self.vectors is not None else additional_vectors
     
     def __getitem__(self, item):
         if isinstance(item, str):
@@ -49,13 +68,46 @@ class TaggedVectors(object):
     def __len__(self):
         return self.vectors.shape[0] if self.vectors is not None else 0
     
+    def fit_linkage_matrix(self, method='single', metric='euclidean', optimal_ordering=False):
+        assert len(self), "You must first fit text vectors."
+        print("acquire distance matrix")
+        pdist = spatial.distance.pdist(self.vectors, metric=metric)
+        print("acquire linkage_matrix")
+        self.linkage_matrix = cluster.hierarchy.linkage(pdist, method=method, metric=metric, optimal_ordering=optimal_ordering)
+        print("Finished!")
+        
+    def fcluster(self, t, *args, **kwargs):
+        assert self.linkage_matrix is not None, "You must first fit linkage matrix using TaggedVectors.fit_linkage_matrix"
+        print("flatten cluster")
+        self.clusters = cluster.hierarchy.fcluster(self.linkage_matrix, t, *args, **kwargs).tolist()
+        print("Finished!")
+    
+    def fit_kmeans(self, n_clusters=8, init='k-means++', n_init=10, max_iter=300, tol=0.0001, precompute_distances='auto', verbose=0, random_state=None, copy_x=True, n_jobs=None, algorithm='auto'):
+        assert len(self), "You must first fit text vectors."
+        self.kmeans=KMeans(n_clusters, init, n_init, max_iter, tol, precompute_distances, verbose, random_state, copy_x, n_jobs, algorithm)
+        model = self.kmeans.fit(self.vectors)
+        self.clusters = model.labels_
+        return model
+    
+    def get_cluster(self, key):
+        return self.clusters[self.tagged_indice[key]]
+    
+    def get_array(self, vectors=None):
+        vectors = vectors if vectors is not None else self.vectors
+        if self.vector_type == 'numpy_array':
+            return vectors
+        elif self.vector_type == 'scipy_sparse_matrix':
+            return vectors.toarray()
+        raise Exception('Invalid vector_type '+str(self.vector_type))
+    
     def knn(self, query_vectors, k=10):
         distances_list, indice_list = NearestNeighbors(
             n_neighbors=k, 
             metric='cosine', 
-            algorithm='brute'
-        ).fit(self.vectors).kneighbors(query_vectors)
-        return [list(zip([self.indexed_tags[i] for i in indice], [round(d, 3) for d in distances])) 
+            algorithm='brute',
+            n_jobs=cpu_count()
+        ).fit(self.get_array()).kneighbors(query_vectors)
+        return [list(zip([self.indexed_tags[i] for i in indice], [round(1-d, 3) for d in distances])) 
                         for distances, indice in zip(distances_list, indice_list)]
 
 def get_ngram_set(s, n):
@@ -126,6 +178,9 @@ class JstatutreeModelCore(object):
         self.unit = unit
         os.makedirs(self.path, exist_ok=True)
         self.rspace_codes = list(db.mcodes)
+
+    def is_fitted(self):
+        raise Exception("Not Implemented")
     
     def save(self):
         with open(Path(self.path, 'jsmodel.pkl'), 'wb') as f:
@@ -135,18 +190,23 @@ class JstatutreeModelCore(object):
     def load(cls, path):
         with open(Path(path, 'jsmodel.pkl'), 'rb') as f:
             return joblib.load(f)
+        
+    @property
+    def rspace_db(self):
+        return self.db.get_subdb(self.rscape_codes)
     
     def keys_to_ukeys(self, *keys):
         ukeys = []
         for key in keys:
             try:
+                elem = self.db.get_element(key, None)
+                assert elem
+                
+            except:
                 tree = self.db.get_jstatutree(key, None)
                 if tree:
                     elem = tree._root
-                assert tree
-            except:
-                elem = self.db.get_element(key, None)
-                assert elem, 'invalid key: '+str(key)
+                assert tree, 'invalid key: '+str(key)
             if self.unit == 'XSentence':
                 ukeys.extend([c for c, _ in elem.iterXsentence(include_code=True)])
             else:
@@ -171,36 +231,46 @@ class JstatutreeModelCore(object):
         if self.path.exists():
             print('remove dir:', self.path)
             shutil.rmtree(self.path)
-
-    def policy_matching(self, keys, threshold, activation_func, **kwargs):
-        match_obj = PolicyMatchObject(self.db.get_subdb(self.rspace_codes), threshold, activation_func)
-        rankings = self.most_similar_by_keys(keys, name_as_tag=False, append_text=False, append_olap=False, **kwargs)
+    
+    def policy_matching(self, keys, theta, activation_func, sample_num=500, **kwargs):
+        match_factory = PolicyMatchFactory([self.db.get_element(k) for k in keys], theta, activation_func)
+        rankings = self.most_similar_by_keys(keys, topn=sample_num, **kwargs)
         for qtag, ranking in rankings:
             for rtag, similarity in ranking:
-                match_obj.add_leaf(qtag, rtag, similarity, cip=1.0)
-        return match_obj
+                if similarity < theta:
+                    break
+                match_factory.add_leaf(qtag, rtag, similarity, cip=1.0)
+        return match_factory.construct_matching_object(tree_factory = self.db.get_jstatutree)
 
     def most_similar_by_keys(self, keys, *args, **kwargs):
         raise 'Not Implemented.'
 
 class JstatutreeVectorModelBase(JstatutreeModelCore):
     MODEL_TYPE_TAG = ''
-    def __init__(self, db, tag, vector_size, unit='XSentence'):
+    def __init__(self, db, tag, vector_size, unit='XSentence', vector_type='numpy_array'):
         assert hasattr(db, 'tokenizer'), 'TokenizedJstatutreeDB required'
         super().__init__(db, tag, unit)
         self.vector_size = vector_size
         self.vecs = replyvel.DB(Path(self.path, 'db'), target_codes=self.db.target_codes)
-        self.tagged_vectors = TaggedVectors(vector_size)
-
+        self.vector_type = vector_type
+        self.tagged_vectors = self.tagged_vector_factory()
+        
+    def tagged_vector_factory(self):
+        return TaggedVectors(self.vector_size, vector_type=self.vector_type)
+        
+    def fit_kmeans(self, n_clusters=8, init='k-means++', n_init=10, max_iter=300, tol=0.0001, precompute_distances='auto', verbose=0, random_state=None, copy_x=True, n_jobs=None, algorithm='auto', reload_tagged_vectors=True):
+        reload_tagged_vectors and self.reload_tagged_vectors()
+        self.kmeans_model = self.tagged_vectors.fit_kmeans(n_clusters, init, n_init, max_iter, tol, precompute_distances, verbose, random_state, copy_x, n_jobs, algorithm)
+        
     def _calc_vec(self, text):
         raise 'Implementation error'
-        
+    
     def restrict_rspace(self, rspace_codes):
         self.rspace_codes = rspace_codes
         self.reload_tagged_vectors(rspace_codes)
     
     def reload_tagged_vectors(self, rspace_codes=None):
-        self.tagged_vectors = TaggedVectors(self.vector_size)
+        self.tagged_vectors = self.tagged_vector_factory()
         self.tagged_vectors.add_from_keyed_vectors(self.vecs.get_subdb(target_codes=rspace_codes or self.rspace_codes or self.vecs.mcodes).iterator())
 
     def most_similar(self, query_vectors, topn=10, name_as_tag=False, append_text=False):
@@ -222,7 +292,7 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
     def keys_to_vectors(self, *keys, **kwargs):
         return_keys = kwargs.get('return_keys', False)
         ukeys = self.keys_to_ukeys(*keys)
-        vectors = np.array([self.vecs.get(k) for k in ukeys])
+        vectors = self.tagged_vectors.get_array(self.tagged_vectors.vstack(self.vecs.get(k) for k in ukeys))
         print(vectors.shape)
         return (ukeys, vectors) if return_keys else vectors
         
@@ -241,15 +311,19 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
         words = [w for s in e.itersentences() for w in s]
         return self._calc_vec(text)
 
-class ScikitModelBase(SimStringModule, JstatutreeVectorModelBase):
+from sklearn.cluster import KMeans
+class ScikitModelBase(JstatutreeVectorModelBase):
     def _calc_vec(self, text):
         if isinstance(text, str):
             text = self.db.tokenizer(text)
         return self.transformer.transform(text)
-
-    def fit(self):
+    
+    def is_fitted(self):
+        return len(self.tagged_vectors) > 0
+    
+    def fit(self, task_size=None): #task_size argument is just for compatibility
         self.reload_tagged_vectors()
-        if len(self.tagged_vectors):
+        if self.is_fitted():
             print('model already exists.')
             return
         print('Training begin')

@@ -60,16 +60,18 @@ class JstatutreeDB(object):
         return self.jstatutree_db.mcodes
     
     def get_tokenized_db(self, tokenizer):
-        return TokenizedJstatureeDB(self.path, tokenizer, self.target_codes)
+        return TokenizedJstatutreeDB(self.path, tokenizer, self.target_codes)
     
     def remove_files(self):
-        shutil.rmtree(self.path)
+        if self.path.exists():
+            print('rmdir:', self.path)
+            shutil.rmtree(self.path)
     
     def get_subdb(self, target_codes):
         for code in target_codes:
             if not self.jstatutree_db._code_ptn_match(code):
                 raise ValueError('Invalid code: '+str(code))
-        return JstatutreeDB(self.path, target_codes)
+        return self.__class__(self.path, target_codes)
     
     def split_by_pref(self):
         return [ (pcode, self.get_subdb(list(mcodes))) for pcode, mcodes in groupby(sorted(self.mcodes, key=lambda x: int(x)), key=lambda x: x[:2])]
@@ -104,6 +106,16 @@ class JstatutreeDB(object):
             self.put_element(child)
         self.element_db[element.etype].put(element.code, element)
      
+        
+    def get(self, code, default=None):
+        parts = Path(code).parts
+        if len(parts) == 3:
+            return self.get_jstatutree(code, default)
+        elif len(parts) > 3:
+             if code2etype(code) in self.element_db:
+                return self.get_element(code, default)
+        return default
+    
     def get_jstatutree(self, code, default=None):
         code = str(ReikiCode(code))
         jstree = self.jstatutree_db.get(code, None)
@@ -115,6 +127,9 @@ class JstatutreeDB(object):
     def get_element(self, code, default=None):
         code = str(code)
         etype = code2etype(code)
+        if code2etype(code) not in self.element_db:
+            ret = self.get_jstatutree(code, None)
+            return None if ret is None else ret.getroot()
         elem = self.element_db[etype].get(code)
         if elem is None:
             return default
@@ -187,11 +202,16 @@ class JstatutreeDB(object):
                     raise e
 
 class MultiProcWriter(object):
-    def __init__(self, db_path, target_codes='ALL', workers=None, tokenizer=None):
-        if tokenizer:
-            self.db = TokenizedJstatutreeDB(path=db_path, tokenizer=tokenizer, target_codes=target_codes)
+    def __init__(self, db_path=None, db=None, target_codes='ALL', workers=None, tokenizer=None):
+        if db is not None:
+            self.db = db
+        elif db_path is not None:
+            if tokenizer:
+                self.db = TokenizedJstatutreeDB(path=db_path, tokenizer=tokenizer, target_codes=target_codes)
+            else:
+                self.db = JstatutreeDB(path=db_path, target_codes=target_codes)
         else:
-            self.db = JstatutreeDB(path=db_path, target_codes=target_codes)
+            raise Exception("You mast pass db or db_pass for initialize MultiProcWriter")
         self.workers=workers or cpu_count()
         
     def write_batch_pref_set(self, prefs_path, print_log=False, error_detail=True, print_skip=True, only_reiki=True, *wbargs, **wbkwargs):
@@ -269,7 +289,7 @@ class TokenizedJstatutreeDB(JstatutreeDB):
         self.element_db[element.etype].put(element.code, element)
     
     def get_subdb(self, target_codes):
-        return TokenizedJstatutreeDB(self.path, self.tokenizer, target_codes)
+        return self.__class__(self.path, self.tokenizer, target_codes)
     
     def get_jstatutree(self, code, default=None):
         code = str(ReikiCode(code))

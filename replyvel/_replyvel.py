@@ -28,11 +28,14 @@ class DB(object):
         self._db_acquire_timeout = db_acquire_timeout
         self._db_cache = dict()
 
+    def split_unit(self):
+        return [self.get_subdb([mcode]) for mcode in self.mcodes]
+        
     def get_subdb(self, target_codes):
         for code in target_codes:
             if not self._code_ptn_match(code):
                 raise ValueError('Invalid code: '+str(code))
-        return DB(self.basepath, target_codes, self._auto_release_interval, self._db_acquire_timeout)
+        return self.__class__(self.basepath, target_codes, self._auto_release_interval, self._db_acquire_timeout)
         
     def suspend_releaser(self):
         self._auto_release_interval = db_unit.INF_RELEASE_TIME
@@ -121,13 +124,13 @@ class DB(object):
         else:
             shutli.rmtree(self.get_db_path(mcode))
     
-    @staticmethod
-    def _encode_key(key):
+    @classmethod
+    def _encode_key(cls, key):
         parts = Path(key).parts
         return parts[1], os.path.join(*parts[2:]).encode()
     
-    @staticmethod
-    def _decode_key(mcode, item_key):
+    @classmethod
+    def _decode_key(cls, mcode, item_key):
         return os.path.join(mcode[:2], mcode, item_key.decode())
     
     @staticmethod

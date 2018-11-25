@@ -31,12 +31,6 @@ class SentenceGenerator(object):
         self.db = db
         self.unit = unit
         self.include_key = include_key
-
-    def export_corpus(self, path, workers=None):
-        # todo: complete this function
-        workers = workers or cpu_count()
-        with concurrent.futures.ProcessPoolExecutor(workers) as executor:
-            vectors = np.vstack([v for t, v in executor.map(self._vector_production, [db for c, db in self.db.split_by_dbcount(self.workers)]   ) if not tags.extend(t)])
     
     def __iter__(self):
         if self.unit == 'XSentence':
@@ -61,6 +55,16 @@ class JstatutreeDB(object):
     
     def get_tokenized_db(self, tokenizer):
         return TokenizedJstatutreeDB(self.path, tokenizer, self.target_codes)
+    
+    def export_corpus(self, unit, path=None):
+        path = Path(path) or self.path/'corpus.txt'
+        if path.exists():
+            print(path, "already exists.")
+            return
+        with open(path, 'wb') as f:
+            for s in SentenceGenerator(self, unit, False):
+                f.writelines(''.join(s).rstrip()+'\n')
+                
     
     def remove_files(self):
         if self.path.exists():
@@ -279,7 +283,16 @@ class TokenizedJstatutreeDB(JstatutreeDB):
                     wb.put(e.code, [])
                 if overwrite or isinstance(e.text, str):
                     wb.put(e.code, self.tokenizer.tokenize(e.text))
-            
+                    
+    def export_corpus(self, unit, path=None):
+        path = Path(path) or self.path/'corpus.txt'
+        if path.exists():
+            print(path, "already exists.")
+            return
+        with open(path, 'wb') as f:
+            for s in SentenceGenerator(self, unit, False):
+                f.writelines(' '.join(s).rstrip()+'\n')
+                
     def put_element(self, element):
         assert isinstance(element, Element)
         if element.etype == 'Sentence':

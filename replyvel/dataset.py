@@ -184,6 +184,8 @@ class JstatutreeDB(object):
         assert re.match('\d{6}', mcode), 'Inappropriate path: '+str(path)
         with self.write_batch(*wbargs, **wbkwargs) as wb:
             for path in Path(path).iterdir():
+                if re.match('\.DS_Store$', str(path)):
+                    continue
                 try:
                     jstree = Jstatutree(path)
                     if (not only_reiki) or jstree.lawdata.is_reiki():
@@ -216,12 +218,15 @@ class MultiProcWriter(object):
         
     def write_batch_pref_set(self, prefs_path, print_log=False, error_detail=True, print_skip=True, only_reiki=True, *wbargs, **wbkwargs):
         for pref_path in Path(prefs_path).iterdir():
-            self.write_batch_pref_directory(pref_path, print_log, error_detail, print_skip, only_reiki, *wbargs, **wbkwargs)
+            if pref_path.is_dir():
+                self.write_batch_pref_directory(pref_path, print_log, error_detail, print_skip, only_reiki, *wbargs, **wbkwargs)
             
     def write_batch_pref_directory(self, pref_path, print_log=False, error_detail=True, print_skip=True, only_reiki=True, *wbargs, **wbkwargs):
         with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
             futures = []
             for muni_path in Path(pref_path).iterdir():
+                if not muni_path.is_dir():
+                    print('skip muni (not dir):',muni_path)
                 mcode = Path(muni_path).name
                 try:
                     subdb = self.db.get_subdb( [mcode])

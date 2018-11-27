@@ -32,10 +32,11 @@ class DB(object):
         return [self.get_subdb([mcode]) for mcode in self.mcodes]
         
     def get_subdb(self, target_codes):
-        for code in target_codes:
-            if not self._code_ptn_match(code):
-                raise ValueError('Invalid code: '+str(code))
-        return self.__class__(self.basepath, target_codes, self._auto_release_interval, self._db_acquire_timeout)
+        ptns = self._get_mcode_ptns(target_codes)
+        subdb_mcodes = [mcode for mcode in self.mcodes if self._code_ptn_match(mcode, ptns=ptns)]
+        if len(subdb_mcodes) == 0:
+            raise ValueError('Invalid code: '+', '.join(target_codes))
+        return self.__class__(self.basepath, subdb_mcodes, self._auto_release_interval, self._db_acquire_timeout)
         
     def suspend_releaser(self):
         self._auto_release_interval = db_unit.INF_RELEASE_TIME

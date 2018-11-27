@@ -53,7 +53,7 @@ class TaggedVectors(object):
         additional_vectors = [vec for tag, vec in iterator if (self._add_tags(tag) or True)]
         if len(additional_vectors) == 0:
             return 
-        self.vectors = self.vstack([self.vectors, self.vstack(additional_vectors)]) if self.vectors is not None else additional_vectors
+        self.vectors = self.vstack([self.vectors, self.vstack(additional_vectors)]) if self.vectors is not None else self.vstack(additional_vectors)
     
     def __getitem__(self, item):
         if isinstance(item, str):
@@ -193,7 +193,7 @@ class JstatutreeModelCore(object):
         
     @property
     def rspace_db(self):
-        return self.db.get_subdb(self.rscape_codes)
+        return self.db.get_subdb(self.rspace_codes)
     
     def keys_to_ukeys(self, *keys):
         ukeys = []
@@ -319,28 +319,42 @@ class ScikitModelBase(JstatutreeVectorModelBase):
         return self.transformer.transform(text)
     
     def is_fitted(self):
-        return len(self.tagged_vectors) > 0
+        return len(self.vecs) > 0
+    
+    @property
+    def training_corpus_path(self):
+        return self.path/'training_corpus'
+    
+    def get_training_corpus(self):
+        if not self.training_corpus_path.exists():
+            os.makedirs(self.training_corpus_path, exist_ok=True)
+            print('Export corpus file to', self.training_corpus_path)
+            self.db.export_corpus(path=self.training_corpus_path, unit=self.unit)
+        return self.training_corpus_path
     
     def fit(self, task_size=None): #task_size argument is just for compatibility
-        self.reload_tagged_vectors()
         if self.is_fitted():
             print('model already exists.')
             return
         print('Training begin')
-        tags = []
-        vectors = self.transformer.fit_transform(
-            (
-                " ".join(words) for key, words in SentenceGenerator(self.db, self.unit, True) if (tags.append(key) or True)
+        with open(self.get_training_corpus()/'corpus.txt') as f:
+            vectors = self.transformer.fit_transform(
+                (
+                    f
+                )
             )
-        )
+        print(vectors.shape, vectors[0].shape)
+        #print(vectors)
         print('Training finished')
         print('Add vectors to replyvel.DB')
-        with self.vecs.write_batch() as wb:
-            for tag, vector in zip(tags, vectors):
-                if vector.shape != (self.vector_size,):
-                    print('skip:', tag)
-                wb.put(tag, vector)
-        print('Add vectors to TaggedVectors')
-        #self.tagged_vectors.add_from_tags_and_vectors(tags, vectors)
+        with open(self.get_training_corpus()/'tags.txt') as tags:
+            with self.vecs.write_batch() as wb:
+                for i, tag in enumerate(tags):
+                    tag = tag.rstrip()
+                    vector = vectors[i]
+                    #if vector.shape != (self.vector_size,):
+                        #print('skip:', tag, vector.shape)
+                        #continue
+                    wb.put(tag, vector)
         print('Model fitting complete!')
         self.save()

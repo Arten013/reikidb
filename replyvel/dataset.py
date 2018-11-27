@@ -32,6 +32,9 @@ class SentenceGenerator(object):
         self.unit = unit
         self.include_key = include_key
     
+    def sentence_list(self):
+        return list(self)
+    
     def __iter__(self):
         if self.unit == 'XSentence':
             sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.iterXsentence(include_code=True) if v is not None and len(v) > 0)
@@ -56,15 +59,22 @@ class JstatutreeDB(object):
     def get_tokenized_db(self, tokenizer):
         return TokenizedJstatutreeDB(self.path, tokenizer, self.target_codes)
     
-    def export_corpus(self, unit, path=None):
-        path = Path(path) or self.path/'corpus.txt'
-        if path.exists():
-            print(path, "already exists.")
+    def export_corpus(self, unit, path=None, workers=None, batch_size=30):
+        corpus_path = Path((path or self.path)/'corpus.txt')
+        tag_path = Path((path or self.path)/'tags.txt')
+        if tag_path.exists():
+            print(tag_path, "already exists.")
             return
-        with open(path, 'wb') as f:
-            for s in SentenceGenerator(self, unit, False):
-                f.writelines(''.join(s).rstrip()+'\n')
-                
+
+        splitted_dbs = [d for c, d in self.split_by_muni()]
+        
+        with open(corpus_path, 'w') as sf:
+            with open(tag_path, 'w') as tf:
+                for db_batch in [splitted_dbs[i:i+batch_size] for i in range(0, len(splitted_dbs), batch_size)]:
+                    with concurrent.futures.ProcessPoolExecutor(workers) as executor:
+                        futures = [executor.submit(SentenceGenerator(subdb, unit, True).sentence_list) for subdb in db_batch]
+                        for future in concurrent.futures.as_completed(futures):
+                            [(sf.writelines(sent.rstrip()+'\n') , tf.writelines(tag+'\n')) for tag, sent in future.result()]
     
     def remove_files(self):
         if self.path.exists():
@@ -72,10 +82,11 @@ class JstatutreeDB(object):
             shutil.rmtree(self.path)
     
     def get_subdb(self, target_codes):
-        for code in target_codes:
-            if not self.jstatutree_db._code_ptn_match(code):
-                raise ValueError('Invalid code: '+str(code))
-        return self.__class__(self.path, target_codes)
+        ptns = self.jstatutree_db._get_mcode_ptns(target_codes)
+        subdb_mcodes = [mcode for mcode in self.mcodes if self.jstatutree_db._code_ptn_match(mcode, ptns=ptns)]
+        if len(subdb_mcodes) == 0:
+            raise ValueError('Invalid code: '+', '.join(target_codes))
+        return self.__class__(self.path, subdb_codes)
     
     def split_by_pref(self):
         return [ (pcode, self.get_subdb(list(mcodes))) for pcode, mcodes in groupby(sorted(self.mcodes, key=lambda x: int(x)), key=lambda x: x[:2])]
@@ -147,6 +158,7 @@ class JstatutreeDB(object):
         
     def _complete_element(self, elem):
         elem._children = [self.get_element(child_code, None) for child_code in list(elem)]
+        assert None in elem._children, 'Incomplete Element: ' + str(elem)
         return elem
     
     def iter_lawcodes(self, target_codes=None):
@@ -289,14 +301,22 @@ class TokenizedJstatutreeDB(JstatutreeDB):
                 if overwrite or isinstance(e.text, str):
                     wb.put(e.code, self.tokenizer.tokenize(e.text))
                     
-    def export_corpus(self, unit, path=None):
-        path = Path(path) or self.path/'corpus.txt'
-        if path.exists():
-            print(path, "already exists.")
+    def export_corpus(self, unit, path=None, workers=None, batch_size=30):
+        corpus_path = Path((path or self.path)/'corpus.txt')
+        tag_path = Path((path or self.path)/'tags.txt')
+        if tag_path.exists():
+            print(tag_path, "already exists.")
             return
-        with open(path, 'wb') as f:
-            for s in SentenceGenerator(self, unit, False):
-                f.writelines(' '.join(s).rstrip()+'\n')
+
+        splitted_dbs = [d for c, d in self.split_by_muni()]
+        
+        with open(corpus_path, 'w') as sf:
+            with open(tag_path, 'w') as tf:
+                for db_batch in [splitted_dbs[i:i+batch_size] for i in range(0, len(splitted_dbs), batch_size)]:
+                    with concurrent.futures.ProcessPoolExecutor(workers) as executor:
+                        futures = [executor.submit(SentenceGenerator(subdb, unit, True).sentence_list) for subdb in db_batch]
+                        for future in concurrent.futures.as_completed(futures):
+                            [(sf.writelines(''.join(' '.join(sent).rstrip()+'\n')) , tf.writelines(tag+'\n')) for tag, sent in future.result()]
                 
     def put_element(self, element):
         assert isinstance(element, Element)

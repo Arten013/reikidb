@@ -33,7 +33,8 @@ class DB(object):
         
     def get_subdb(self, target_codes):
         ptns = self._get_mcode_ptns(target_codes)
-        subdb_mcodes = [mcode for mcode in self.mcodes if self._code_ptn_match(mcode, ptns=ptns)]
+        #subdb_mcodes = [mcode for mcode in self.mcodes if self._code_ptn_match(mcode, ptns=ptns)]
+        subdb_mcodes = target_codes
         if len(subdb_mcodes) == 0:
             raise ValueError('Invalid code: '+', '.join(target_codes))
         return self.__class__(self.basepath, subdb_mcodes, self._auto_release_interval, self._db_acquire_timeout)

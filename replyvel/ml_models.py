@@ -22,6 +22,7 @@ from concurrent.futures import ProcessPoolExecutor
 import simstring
 import hashlib
 from .policy_match import PolicyMatchFactory
+from fastText import train_unsupervised
 
 
 class TfIdf(ScikitModelBase):
@@ -83,61 +84,19 @@ class LSI(ScikitModelBase):
         submodel.transformer = self.transformer
         return submodel
 
-
 class FastText(JstatutreeVectorModelBase):
     MODEL_TYPE_TAG = 'fasttext'
-    def __init__(self, tdb, tag, wvmodel_path, vector_size=None, unit='XSentence', workers=None):
+    def __init__(self, db, tag, wvmodel_path, vector_size=None, unit='XSentence', workers=None):
         self.wvmodel_path = wvmodel_path
         self._wvmodel = None
         self.workers = workers or cpu_count()
         vector_size = vector_size or self.wvmodel.vector_size
-        super().__init__(tdb, tag, vector_size, unit)
+        super().__init__(db, tag, vector_size, unit)
         
     def get_submodel(self, *mcodes):
         submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.wvmodel_path, self.vector_size, self.unit, self.workers)
         submodel.reload_tagged_vectors()
         return submodel
-    
-    def get_wmd(self, tag1, tag2):
-        tag2sent = lambda tag: [word for sentence in self.db.get_element(tag).itersentence() for word in sentence]
-        return round(self.wvmodel.wmdistance(tag2sent(tag1), tag2sent(tag2)), 3)
-    
-    def most_similar_by_keys(self, keys, topn=10, name_as_tag=False, append_text=False, append_olap=False, olap_measure='cosine', olap_ngram=3, using_wmd=False, wmd_topn=None):
-        if not wmd_topn or wmd_topn < topn:
-            wmd_topn = topn*10
-        ukeys, query_vectors = self.keys_to_vectors(*keys, return_keys=True)
-        olap_func = self.OLAP_FUNCTIONS.get(olap_measure, 'cosine')
-        if not len(self.tagged_vectors):
-            self.reload_tagged_vectors()
-        ret = []
-        if using_wmd:
-            rankings = [
-                (
-                    qtag, 
-                    sorted([(t, self.get_wmd(qtag, t)) for t, d in ranking], key=lambda x: x[1])[:topn]
-                )
-                    for qtag, ranking in zip(ukeys, self.tagged_vectors.knn(query_vectors, k=wmd_topn))
-            ]
-        else:
-            rankings = zip(ukeys, self.tagged_vectors.knn(query_vectors, k=topn))
-        for qtag, tag_dist_pairs in rankings:
-            #print(tag_dist_pairs)
-            ranking = tag_dist_pairs
-            tag2sent = lambda x: ''.join([re.sub('▁', '', w) for s in self.db.get_element(x).itersentence() for w in s])
-            if append_text:
-                ranking = (
-                    (t, d, tag2sent(t), olap_func(tag2sent(t), tag2sent(qtag), olap_ngram)) if append_olap else (t, d, tag2sent(t))
-                      for t, d in ranking  
-                )
-            elif append_olap:
-                ranking = (
-                    (t, d, olap_func(tag2sent(t), tag2sent(qtag), olap_ngram))
-                      for t, d in ranking  
-                )
-            if name_as_tag:
-                ranking = ((self.db.get_element_name(x[0], x[0]), *x[1:]) for x in ranking)
-            ret.append(list(ranking))
-        return zip(ukeys, ret)
     
     @property
     def wvmodel(self):
@@ -185,17 +144,25 @@ class FastText(JstatutreeVectorModelBase):
             print('<proc {}>'.format(pid), "begin sync write")
         print('<proc {}>'.format(pid), 'task finished')
         return mcodes
+    
     def __getstate__(self):
         self._wvmodel = None
-        return self.__dict__
-
-    def fit(self, task_size=None):
-        self.reload_tagged_vectors()
-        if len(self.tagged_vectors):
+        return self.__dict__    
+    
+    def fit(self, task_size=None): #task_size argument is just for compatibility
+        if self.is_fitted():
             print('model already exists.')
             return
         print('Training begin')
-
+        if self.wvmodel is None:
+            print("training fasttext model")
+            model = train_unsupervised(
+                input=str(self.get_training_corpus()/'corpus.txt'),
+                model='skipgram',
+            )
+            model.save_model(str(self.get_training_corpus()/'model.bin'))
+            del model
+        
         target_mcodes = sorted(self.db.mcodes, key=lambda x: int(x))
         task_num = len(target_mcodes)
         finished_mcodes = []
@@ -214,7 +181,56 @@ class FastText(JstatutreeVectorModelBase):
         print('Model fitting complete!')
         self.save()
 
-        
+class FastTextWMD(FastText):
+    def init_from_FastText():
+    
+    def _calc_vec(self, text):
+        raise "WMD model do not using vector"
+    
+    def get_wmd(self, tag1, tag2):
+        return round(
+            self.wvmodel.wmdistance(
+                [word for sentence in self.db.get_element(tag1).itersentence() for word in sentence], 
+                [word for sentence in self.db.get_element(tag2).itersentence() for word in sentence], 
+            3)
+        )
+            
+    def _vector_production(self, mcodes):
+        raise "WMD model do not using vector"
+            
+    def most_similar_by_keys(self, keys, topn=10, name_as_tag=False, append_text=False, sample_num=None):
+        if not sample_num or sample_num < topn:
+            sample_num = topn*10
+        ukeys, query_vectors = self.keys_to_vectors(*keys, return_keys=True)
+        if not len(self.tagged_vectors):
+            self.reload_tagged_vectors()
+        ret = []
+        rankings = [
+            (
+                qtag, 
+                sorted([(t, self.get_wmd(qtag, t)) for t, d in ranking], key=lambda x: x[1])[:topn]
+            )
+                for qtag, ranking in zip(ukeys, self.tagged_vectors.knn(query_vectors, k=wmd_topn))
+        ]
+        for qtag, tag_dist_pairs in rankings:
+            #print(tag_dist_pairs)
+            ranking = tag_dist_pairs
+            tag2sent = lambda x: ''.join([re.sub('▁', '', w) for s in self.db.get_element(x).itersentence() for w in s])
+            if append_text:
+                ranking = (
+                    (t, d, tag2sent(t), olap_func(tag2sent(t), tag2sent(qtag), olap_ngram)) if append_olap else (t, d, tag2sent(t))
+                      for t, d in ranking  
+                )
+            elif append_olap:
+                ranking = (
+                    (t, d, olap_func(tag2sent(t), tag2sent(qtag), olap_ngram))
+                      for t, d in ranking  
+                )
+            if name_as_tag:
+                ranking = ((self.db.get_element_name(x[0], x[0]), *x[1:]) for x in ranking)
+            ret.append(list(ranking))
+        return zip(ukeys, ret)
+    
 class ReverseSentenceDB(replyvel.DB):
     @classmethod
     def sentence_hash(cls, x):
@@ -251,7 +267,7 @@ class SimString(JstatutreeModelCore):
         if self.rspace_reversed_dict is None:
             self.restrict_rspace(self.db.mcodes)
         simstrings = {mcode: simstring.reader(str(Path(self.simstring_path, mcode, 'db'))) 
-                for mcode in (self.rspace_codes or self.db.mcodes) if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
+                for mcode in self.rspace_db.mcodes if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
         for ss in simstrings.values():
             ss.measure = self.method
             ss.theta = theta
@@ -270,11 +286,19 @@ class SimString(JstatutreeModelCore):
     @staticmethod
     def get_ngram_set(s, n):
         s = '▁'*(n-1) + s + '▁'*(n-1)
-        return set([s[i:i+n] for i in range(len(s)-(n-1))])
+        ngrams = []
+        for i in range(len(s)-(n-1)):
+            ngram = s[i:i+n]
+            while ngram in ngrams:
+                ngram += '#'
+            ngrams.append(ngram)
+        return set(ngrams)
     
     def calc_similarity(self, x, y):
         if self.method == simstring.cosine:
             return round([ len(nx&ny) / math.sqrt( len(nx)*len(ny) )  for nx in [self.get_ngram_set(x, self.ngram)] for ny in [self.get_ngram_set(y, self.ngram)] ][0], 3)
+        elif self.method == simstring.dice:
+            return round([2*len(nx&ny) /( len(nx)+len(ny) )  for nx in [self.get_ngram_set(x, self.ngram)] for ny in [self.get_ngram_set(y, self.ngram)] ][0], 3)
     
     def _fit_unit_task(self, mcodes):
         pid = os.getpid()

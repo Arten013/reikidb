@@ -82,11 +82,10 @@ class JstatutreeDB(object):
             shutil.rmtree(self.path)
     
     def get_subdb(self, target_codes):
-        ptns = self.jstatutree_db._get_mcode_ptns(target_codes)
-        subdb_mcodes = [mcode for mcode in self.mcodes if self.jstatutree_db._code_ptn_match(mcode, ptns=ptns)]
+        subdb_mcodes = self.jstatutree_db.get_subdb(target_codes).mcodes
         if len(subdb_mcodes) == 0:
             raise ValueError('Invalid code: '+', '.join(target_codes))
-        return self.__class__(self.path, subdb_codes)
+        return self.__class__(self.path, subdb_mcodes)
     
     def split_by_pref(self):
         return [ (pcode, self.get_subdb(list(mcodes))) for pcode, mcodes in groupby(sorted(self.mcodes, key=lambda x: int(x)), key=lambda x: x[:2])]
@@ -121,14 +120,21 @@ class JstatutreeDB(object):
             self.put_element(child)
         self.element_db[element.etype].put(element.code, element)
      
-        
+    def __getitem__(self, key):
+        val = self.get(key, None)
+        if val is None:
+            raise KeyError(key)
+        return val
+    
     def get(self, code, default=None):
         parts = Path(code).parts
         if len(parts) == 3:
             return self.get_jstatutree(code, default)
         elif len(parts) > 3:
-             if code2etype(code) in self.element_db:
+            if code2etype(code) in self.element_db:
                 return self.get_element(code, default)
+            print("Warning: Unrecognizable object accessed from the function get_element()")
+            print("Key:", code, "recognized as etype", code2etype(code))
         return default
     
     def get_jstatutree(self, code, default=None):
@@ -143,6 +149,8 @@ class JstatutreeDB(object):
         code = str(code)
         etype = code2etype(code)
         if code2etype(code) not in self.element_db:
+            print("Warning: Non-element object accessed from the function get_element()")
+            print("Key:", code, "recognized as etype", etype)
             ret = self.get_jstatutree(code, None)
             return None if ret is None else ret.getroot()
         elem = self.element_db[etype].get(code)
@@ -157,8 +165,9 @@ class JstatutreeDB(object):
         return lawname+code2jname(str(code))
         
     def _complete_element(self, elem):
-        elem._children = [self.get_element(child_code, None) for child_code in list(elem)]
-        assert None in elem._children, 'Incomplete Element: ' + str(elem)
+        if len(elem):
+            elem._children = [self[child_code] for child_code in elem]
+            assert None not in elem._children, 'Incomplete Element: ' + str(elem.code) + "\n" + str(list(elem)) 
         return elem
     
     def iter_lawcodes(self, target_codes=None):

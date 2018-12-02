@@ -319,8 +319,16 @@ class ScikitModelBase(JstatutreeVectorModelBase):
         return self.transformer.transform(text)
     
     def is_fitted(self):
-        return len(self.vecs) > 0
-    
+        iterator = self.vecs.iterator(include_key=False, include_value=False)
+        try:
+            next(iterator)
+            ret = True
+        except StopIteration:
+            ret = False
+        finally:
+            del iterator
+        return ret
+
     @property
     def training_corpus_path(self):
         return self.path/'training_corpus'

@@ -21,7 +21,7 @@ from .dataset import SentenceGenerator
 from concurrent.futures import ProcessPoolExecutor
 import simstring
 import hashlib
-from .policy_match import PolicyMatchFactory
+from .policy_match import BUPolicyMatchFactory as PolicyMatchFactory
 from fastText import train_unsupervised
 
 
@@ -180,10 +180,11 @@ class FastText(JstatutreeVectorModelBase):
         assert len(target_mcodes)==len(finished_mcodes) and set(target_mcodes) == set(finished_mcodes)
         print('Model fitting complete!')
         self.save()
+        
+    def get_wmd_model(self):
+        return FastTextWMD(self.db, self.tag, self.wvmodel_path, self.vector_size, self.unit)
 
 class FastTextWMD(FastText):
-    def init_from_FastText():
-    
     def _calc_vec(self, text):
         raise "WMD model do not using vector"
     
@@ -262,7 +263,7 @@ class SimString(JstatutreeModelCore):
         else:
             self.simstring = None
 
-    def policy_matching(self, keys, theta, activation_func, topn=10, **kwargs):
+    def policy_matching(self, keys, theta, activation_func, topn=10, weight_query_by_rescount=True, weight_border=5, **kwargs):
         match_factory = PolicyMatchFactory([self.db.get_element(k) for k in keys], theta, activation_func)
         if self.rspace_reversed_dict is None:
             self.restrict_rspace(self.db.mcodes)
@@ -270,18 +271,49 @@ class SimString(JstatutreeModelCore):
                 for mcode in self.rspace_db.mcodes if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
         for ss in simstrings.values():
             ss.measure = self.method
-            ss.theta = theta
+            ss.threshold  = theta
         usents = {uk:''.join(self.db.get_element(uk).itersentence()) for uk in self.keys_to_ukeys(*keys)}
         rankings = []
+        weights = {}
         for qkey, qsent in usents.items():
-            #print(qkey)
-            [match_factory.add_leaf(qkey, skey, sim, cip=1.0)
-                    for ss in simstrings.values()
-                    for sent in ss.retrieve(qsent)
-                    for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), [])
+            """
+            sims = []
+            
+            retrieved_sentences = set(s for gc, ss in simstrings.items() for s in ss.retrieve(qsent))
+            if len(retrieved_sentences) == 0:
+                continue
+            print(qkey)
+            print(qsent)
+            print('{0} sents found'.format(len(retrieved_sentences)))
+            retrieved_keys = []
+            for sent in retrieved_sentences:
+                keys = self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), [])
+                sim = self.calc_similarity(qsent, sent)
+                sims.extend([sim]*len(keys))
+                retrieved_keys.extend(keys)
+                print(sent)
+                minus = 0
+                for skey in keys:
+                    if skey == qkey:
+                        minus = 1
+                        continue
+                        
+                    match_factory.add_leaf(qkey, skey, sim, cip=1.0)
+                print('{0} keys found, similarity is {1}'.format(len(keys)-minus, sim))
+            print('Finally, {0} keys found '.format(len(retrieved_sentences)))
+            """
+            sims = np.array([(not match_factory.add_leaf(qkey, skey, sim, cip=1.0)) or sim
+                    
+                    for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
+                    for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if sum(1 if k in skey else 0 for k in keys)==0
                     for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
-                ]
-        return match_factory.construct_matching_object(tree_factory = self.db.get_jstatutree)
+                ])
+            if weight_query_by_rescount:
+                weights[qkey] = weight_border/(weight_border+np.sum(sims))
+        match = match_factory.construct_matching_object(tree_factory = self.db.get_jstatutree)
+        for qkey, w in weights.items():
+            match.find_elem(qkey).attrib["weight"] = w
+        return match
             
     @staticmethod
     def get_ngram_set(s, n):

@@ -10,7 +10,7 @@ import pickle
 import math
 from multiprocessing import cpu_count
 
-from .policy_match import PolicyMatchFactory
+from .policy_match import BUPolicyMatchFactory as PolicyMatchFactory
 from . import _replyvel as replyvel
 from .dataset import SentenceGenerator
 from scipy import cluster, spatial, sparse

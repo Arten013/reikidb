@@ -2,6 +2,7 @@ import re
 import math
 from pathlib import Path
 from itertools import groupby
+from collections import Counter
 import numpy as np
 import jstatutree
 import dill
@@ -12,6 +13,8 @@ from copy import copy
 
 def lca(*keys):
     #print(*keys)
+    if len(keys) == 0:
+        raise ValueError("You must pass at least one argument.")
     lca = Path("")
     for part in Path(keys[0]).parts:
         next_lca = lca/part
@@ -150,7 +153,7 @@ class PolicyMatchObject(object):
         #print(code_pairs)
         return jstatutree.graph.cptable_graph(qelem, telems, code_pairs, sub_code_pairs, tree_name_factory=self._tree_name_factory, layout=layout, **kwargs)
 
-    def calc_element_score(self, element, prox_method='max', *, return_proximity=False, return_diff=False):
+    def calc_element_score(self, element, prox_method='max', *, return_proximity=False, return_diff=False, ):
         score_sum = 0
         rtags = []
         qtags = []
@@ -165,8 +168,10 @@ class PolicyMatchObject(object):
             edges.append((qtag, rtag, round(score, 3)))
         proximity_score = self.calc_element_proximity_score(element, edges, method=prox_method)
         qlca = lca(*qtags)
-        tree_sufficiency_score = self.calc_tree_sufficiency_score(qlca)
-        score = round(score_sum * proximity_score * tree_sufficiency_score, 3)
+        tree_sufficiency_score = len(qtags)/sum(1 for qtag in self.find_elem(qlca).iterXsentence(include_code=True, include_value=False))
+        score_mean = score_sum/len(rtags)
+        #score = round((score_mean + tree_sufficiency_score)/2 * proximity_score, 3)
+        score = round((tree_sufficiency_score + proximity_score)/2, 3)
         #print(element.code, score, round(score_sum, 3), round(proximity_score, 3), round(tree_sufficiency_score, 3))
         ret = [edges, score]
         if return_proximity:
@@ -210,7 +215,7 @@ class PolicyMatchObject(object):
         return diff_elements
     
     def get_match_elements(self, element, threshold, *, prox_method='max', return_diff=False):
-        if 'score' not in element.attrib or len(element.attrib['score']) <= 1 or len(set(rtag for (rtag, sim) in element.attrib['score'].values())) <= 1:
+        if 'score' not in element.attrib or len(element.attrib['edges']) <= 1:
             return []
         item = self.calc_element_score(element, prox_method=prox_method, return_diff=return_diff)
         if item[1] > threshold:
@@ -234,16 +239,19 @@ class PolicyMatchObject(object):
     
     def calc_element_proximity_score(self, root, edges, method='max'):
         xsentences = list(root.iterXsentence(include_code=True, include_value=False))
+        depth_list = list(len(Path(code).parts) for code in xsentences)
+        highest_depth = min(depth_list)
+        decay = 0.5
         distances = [0]
         probabilities = []
-        for code in xsentences:
+        for code, depth in zip(xsentences, depth_list):
             for qtag, rtag, score in edges:
                 if code == rtag:
                     distances.append(0)
                     probabilities.append(score)
                     break
             else:
-                distances[-1] += 1
+                distances[-1] += decay**(depth - highest_depth)
         if "bool" not in method:
             proximities = self.calc_bidirectional_proximities(distances, probabilities)
         else:
@@ -255,10 +263,79 @@ class PolicyMatchObject(object):
         if "smax" in method:
             return 1/(1+max(proximities))
         if 'max' in method:
-            return (len(xsentences) - max(proximities))/len(xsentences)
+            #return (len(xsentences) - max(proximities))/len(xsentences)
+            return 1/math.sqrt(max(proximities) + 1)
         if 'mean' in method:
-            return (len(xsentences) - sum(proximities)/len(xsentences))/len(xsentences)
+            return 1/math.sqrt(sum(proximities)/len(proximities) + 1)
 
+class BUPolicyMatchObject(PolicyMatchObject):
+        
+    def get_submatch(self, telement, minimum_query=True):
+        if isinstance(telement, str):
+            telement = self.find_elem(telement)
+        elif isinstance(telement, jstatutree.Jstatutree):
+            telement = telement.getroot()
+        elif isinstance(telement, jstatutree.element.Element):
+            telement = telement
+        else:
+            raise ValueError("Invalid Argument: {}".format(telement))
+        sub_match_obj = BUPolicyMatchObject()
+        if minimum_query:
+            if telement.attrib.get("score", -1) > 0:
+                qcode = telement.attrib["qlca"]
+                sub_match_obj.queries = {qcode:self.find_elem(qcode)}
+            else:
+                sub_match_obj.queries = {}
+        else:
+            sub_match_obj.queries = self.queries
+        sub_match_obj.query_tree = self.query_tree
+        key = str(jstatutree.lawdata.ReikiCode(telement.code))
+        match_tree = copy(self.match_trees[key])
+        match_tree._root = telement
+        sub_match_obj.match_trees = {key: match_tree}
+        return sub_match_obj
+    
+    def get_match_elements(self, element, threshold, *, prox_method='max', return_diff=False):
+        if 'score' not in element.attrib or len(element.attrib.get('edges', [])) <= 1:
+            return []
+        item = [element.attrib['edges'], round(element.attrib['score'], 3)]
+        if item[1] > threshold:
+            return [(element, *item)]
+        else:
+            return [e for c in list(element) for e in self.get_match_elements(c, threshold, prox_method=prox_method, return_diff=return_diff)]
+        
+    def comp_table(self, threshold, prox_method="max", layout='dot', topn=5, **kwargs):
+        forest = self.calc_policy_forest(threshold, prox_method=prox_method, topn=topn)
+        if len(forest) == 0:
+            print('Warning: comptable is empty')
+            return jstatutree.graph.cptable_graph(
+                self.query_tree.getroot(), 
+                [tree.getroot() for tree in self.match_trees.values()], 
+                [], [], tree_name_factory=self._tree_name_factory, layout=layout, **kwargs)
+        telems = [
+            self.bind_by_lca(*sub_keys)
+            for rc, sub_keys in groupby(
+                [e.code for e, _, s in forest], 
+                key=lambda x: str(jstatutree.lawdata.ReikiCode(x))
+            )
+        ]
+        #print(telems)
+        qcodes = []
+        code_pairs = [
+            (qcodes.append(telement.attrib["qlca"]) or telement.attrib["qlca"], telement.code, score)
+            for telement, _, score in forest
+        ]
+        #qelem = self.find_elem(lca(*qcodes)) if len(qcodes) else self.bind_by_lca(*self.queries.keys())
+        qelem = self.bind_by_lca(*qcodes) if len(qcodes) else self.bind_by_lca(*self.queries.keys())
+        sub_code_pairs = [edge
+                  for telement, edges ,score in forest
+                  for edge in telement.attrib['edges']
+                  if edge not in code_pairs
+                 ]
+        #print(code_pairs)
+        return jstatutree.graph.cptable_graph(qelem, telems, code_pairs, sub_code_pairs, tree_name_factory=self._tree_name_factory, layout=layout, **kwargs)
+        
+        
 
 def step(x, th): return 1/(1+math.exp((th-x)*10000)),
 def relu(x, th): return x if x>=th else 0.0
@@ -279,7 +356,6 @@ ACTIVATION_FUNCS = {
     'sigmoid-g100': sigmoid_100g,
 }      
 class PolicyMatchFactory(object):
-
     def __init__(self, queries, theta, activation_func=None):
         self.queries = {e.code:e if isinstance(e, jstatutree.element.Element) else e.getroot() for e in queries}
         self.theta = theta
@@ -356,5 +432,152 @@ class PolicyMatchFactory(object):
                 match_obj.match_trees[rc] = tree
                 #print('Add candidate tree:', rc)
         return match_obj
+            
+import networkx as nx
+from networkx.algorithms import bipartite
 
+class BUPolicyMatchFactory(object):
+    def __init__(self, queries, theta, activation_func=None, decay=0.5):
+        self.decay = decay
+        self.queries = {e.code:e if isinstance(e, jstatutree.element.Element) else e.getroot() for e in queries}
+        self.theta = theta
+        self.set_activation_func(activation_func)
+        self.rev_match_leaves = {}
+        self.leaf_keys = []
+        self.qelem_weight_sum_cache = {}
+        self.depths = {ec:len(Path(ec).parts) for r in self.queries.values() for ec in r.iterXsentence_code()}
 
+    def set_activation_func(self, func='step'):
+        if type(func) is type(lambda x: x):
+            self.activation_func = func
+        if isinstance(func, str):
+            self.activation_func = ACTIVATION_FUNCS[func]
+
+    def calc_elem_score(self, similarity, cip):
+        return self.activation_func(similarity, self.theta) * cip
+
+    def add_leaf(self, qtag, rtag, similarity, cip):
+        #print(qtag, rtag, similarity)
+        self.rev_match_leaves[rtag] = self.rev_match_leaves.get(rtag, [])
+        self.rev_match_leaves[rtag] += [(qtag, self.calc_elem_score(similarity, cip))]#[(qtag, similarity)]
+        qtag not in self.leaf_keys and self.leaf_keys.append(qtag)
+        return 
+    
+    def find_in_queries(self, code):
+        for k , elem in self.queries.items():
+            if not k in code:
+                print(k, code)
+                continue
+            return elem.find_by_code(code)
+        raise ValueError(str(code))
+    
+    def matching_node(self, elem):
+        qts, rts = [], []
+        new_edges = []
+        G=nx.Graph()
+        for qt, rt, s in edges:
+            G.add_node(qt, bipartite=0)
+            G.add_node(rt, bipartite=1)
+            G.add_edge(qt,rt,weight=s)
+        for rt, qt in nx.max_weight_matching(G):
+            if rt not in self.rev_match_leaves:
+                tmp = rt
+                rt = qt
+                qt = tmp
+            for t, s in self.rev_match_leaves[rt]:
+                if qt == t:
+                    new_edges.append((qt, rt, s))
+                    qts.append(qt)
+                    rts.append(rt)
+                    break
+        return new_edges, rts, qts
+    
+    def scoring_core(self, elem, edges, rematch=True):
+        qts, rts = [], []
+        if rematch:
+            edges, qts, rts = matching_node(self, elem)
+            if len(elem.attrib['edges']) == 0:
+                elem.attrib['score'] = 0
+                return 
+        else:
+            elem.attrib['edges'] = edges
+            for qt, rt, s in edges:
+                qts.append(qt)
+                rts.append(rt)
+        elem.attrib['qlca'] = lca(*[qt for qt, rt, s in elem.attrib['edges']])
+        if elem.attrib['qlca'] not in self.depths:
+            self.depths[elem.attrib['qlca']] =  len(Path(elem.attrib['qlca']).parts)
+        self.depths[elem.code] = len(Path(elem.code).parts)
+        numerator = 0.0
+        for qt, rt, s in elem.attrib['edges']:
+            telem = elem.find_by_code(rt)
+            if telem is None:
+                print(rt, qt)
+                raise ValueError(rt)
+            qelem = self.find_in_queries(qt)
+            if qelem is None:
+                print(rt, qt)
+                raise ValueError(qt)
+            numerator += math.sqrt(qelem.attrib.get('weight', 1.0)*(self.decay**(self.depths[rt]-self.depths[elem.code]))*telem.attrib.get('weight', 1.0)*(self.decay**(self.depths[qt]-self.depths[elem.attrib["qlca"]])) )
+        qdenominator = sum(
+            (qe.attrib.get('weight', 1.0)*self.decay**(self.depths[xskey]-self.depths[elem.attrib['qlca']])) 
+            for xskey, qe in self.find_in_queries(elem.attrib['qlca']).iterXsentence_elem(include_code=True) if xskey not in qts
+        )
+        tdenominator = sum(
+            (e.attrib.get('weight', 1.0) * self.decay**(self.depths.get(k, len(Path(k).parts))-self.depths[elem.code])) 
+            for k, e in elem.iterXsentence_elem(include_code=True) if k not in rts
+        )
+        elem.attrib['score'] = numerator/(math.sqrt((1+qdenominator)*(1+tdenominator))-1+numerator)
+
+    
+        
+    def scoring_match_tree(self, arg, rev_match_leaves):
+        if isinstance(arg, jstatutree.Jstatutree):
+            #print("receive Jstatutree", arg.lawdata.code, list(arg.))
+            elem = arg.getroot()
+        elif isinstance(arg, jstatutree.element.Element):
+            #print("receive Element", arg.code)
+            elem = arg
+        else:
+            raise ValueError("Invalid argument "+str(arg))
+        match_leaf = max(rev_match_leaves.get(elem.code, [(None, -1)]), key=lambda x: x[0])
+        if match_leaf[1] >= 0:
+            elem.attrib['edges'] = [(qtag, elem.code, sim) for qtag, sim in [match_leaf]]
+            elem.attrib['score'] = elem.attrib.get('weight', 1)
+            elem.attrib['qlca'] = match_leaf[0]
+            self.depths[elem.code] = len(Path(elem.code).parts) 
+            return
+        for c in elem:
+            self.scoring_match_tree(c, self.rev_match_leaves)
+        edges = [e for c in elem for e in c.attrib.get('edges', [])]
+        if len(edges) ==0:
+            elem.attrib['edges'] = []
+            return
+        qtags = [e[0] for e in edges]
+        rtags = [e[1] for e in edges]
+        
+        rematch = (len(qtags)+len(rtags) > len(set(qtags))+len(set(rtags)))
+        self.scoring_core(elem, edges, rematch)
+            
+    def construct_matching_object(self, tree_factory, object_factory=BUPolicyMatchObject):
+        print('Construct Matching Object')
+        match_obj = BUPolicyMatchObject()
+        match_obj.queries = self.queries
+        match_obj.query_tree = tree_factory(jstatutree.lawdata.ReikiCode(list(self.queries.keys())[0]))
+        """
+        for key in self.leaf_keys:
+            match_obj.match_leaves[key] = sorted(
+                [(rtag, score) for rtag, items in self.rev_match_leaves.items() for qtag, score in items if qtag == key], 
+                key=lambda x: -x[1]
+            )
+        """
+        counted_rc = Counter(str(jstatutree.lawdata.ReikiCode(rtag)) for rtag in self.rev_match_leaves.keys())
+        for rc, count in counted_rc.items():
+            if count <= 1:
+                continue
+            tree = tree_factory(rc)
+            self.scoring_match_tree(tree, self.rev_match_leaves)
+            if len(tree.getroot().attrib['edges']) > 1:
+                match_obj.match_trees[rc] = tree
+                #print('Add candidate tree:', rc)
+        return match_obj

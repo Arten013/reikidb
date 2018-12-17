@@ -113,8 +113,10 @@ class DBUnit(object):
         self.default_timeout = default_timeout
         self.is_closed = False
         self._auto_releaser = Thread(target=self._auto_release)
-        self._auto_releaser.start()     
-        
+        self._auto_releaser.start()
+
+
+
     def __getstate__(self):
         return {
             "default_timeout": self.default_timeout,

@@ -263,6 +263,26 @@ class SimString(JstatutreeModelCore):
         else:
             self.simstring = None
 
+    def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5):
+        query = self.db.get_jstatutree(query_key).change_root(query_key)
+        if self.rspace_reversed_dict is None:
+            self.restrict_rspace(self.db.mcodes)
+        match_factory = match_factory_cls(query, tree_factory=self.rspace_db.get_jstatutree)
+        simstrings = {mcode: simstring.reader(str(Path(self.simstring_path, mcode, 'db')))
+                      for mcode in self.rspace_db.mcodes if not print('open:', str(Path(self.simstring_path, mcode, 'db')))}
+        for ss in simstrings.values():
+            ss.measure = self.method
+            ss.threshold = theta
+        usents = {uk: sent for uk, sent in query.iterXsentence(include_code=True, include_value=True)}
+        for qkey, qsent in usents.items():
+            sims = np.array([(not match_factory.add_leaf(qkey, skey, sim)) or sim
+                             for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
+                             for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if str(skey) not in str(query.lawdata.code)
+                             for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
+                             ])
+            query.find_by_code(qkey).attrib['weight'] = weight_border/(weight_border+np.sum(sims))
+        return match_factory
+
     def policy_matching(self, keys, theta, activation_func, topn=10, weight_query_by_rescount=True, weight_border=5, **kwargs):
         match_factory = PolicyMatchFactory([self.db.get_element(k) for k in keys], theta, activation_func)
         if self.rspace_reversed_dict is None:

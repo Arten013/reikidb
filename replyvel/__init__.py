@@ -5,6 +5,7 @@ from . import tokenizer
 from . import model_core
 from . import ml_models
 from . import policy_match
+from . import new_policy_match
 
 import traceback
 import os

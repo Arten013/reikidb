@@ -5,7 +5,7 @@ import concurrent
 from itertools import groupby
 from pathlib import Path
 from xml.etree import ElementTree as ET, ElementPath
-from gensim.models.doc2vec import TaggedDocument
+import traceback
 
 from jstatutree import Jstatutree
 from jstatutree.exceptions import LawError
@@ -16,14 +16,6 @@ from multiprocessing import cpu_count
 
 from . import _replyvel as replyvel
 
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer, TfidfTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import TruncatedSVD
-from sklearn.pipeline import Pipeline
-from sklearn.neighbors import NearestNeighbors
-from sklearn.externals import joblib
-import numpy as np
-import pickle
 
 
 class SentenceGenerator(object):
@@ -82,10 +74,8 @@ class JstatutreeDB(object):
             shutil.rmtree(self.path)
     
     def get_subdb(self, target_codes):
-        subdb_mcodes = self.jstatutree_db.get_subdb(target_codes).mcodes
-        if len(subdb_mcodes) == 0:
-            raise ValueError('Invalid code: '+', '.join(target_codes))
-        return self.__class__(self.path, subdb_mcodes)
+        subdb=self.jstatutree_db.get_subdb(target_codes)
+        return self.__class__(self.path, subdb.target_codes)
     
     def split_by_pref(self):
         return [ (pcode, self.get_subdb(list(mcodes))) for pcode, mcodes in groupby(sorted(self.mcodes, key=lambda x: int(x)), key=lambda x: x[:2])]
@@ -253,6 +243,9 @@ class MultiProcWriter(object):
                 if not muni_path.is_dir():
                     print('skip muni (not dir):',muni_path)
                 mcode = Path(muni_path).name
+                if not self.db.jstatutree_db._code_ptn_match(mcode):
+                    continue
+                print(mcode)
                 try:
                     subdb = self.db.get_subdb( [mcode])
                     print('submit path:', muni_path)
@@ -273,6 +266,7 @@ class MultiProcWriter(object):
                             _, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         futures = list(futures)
                 except ValueError:
+                    print(traceback.format_exc())
                     pass
                 except:
                     raise

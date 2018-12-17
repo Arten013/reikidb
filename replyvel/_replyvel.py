@@ -23,6 +23,7 @@ def db_freezer(*dbs):
 class DB(object):
     def __init__(self, basepath, target_codes='ALL', auto_release_interval=3, db_acquire_timeout=5):
         self.basepath = Path(basepath)
+        self.target_codes = target_codes
         self.target_mcode_ptns = self._get_mcode_ptns(target_codes)
         self._auto_release_interval = auto_release_interval
         self._db_acquire_timeout = db_acquire_timeout
@@ -32,9 +33,7 @@ class DB(object):
         return [self.get_subdb([mcode]) for mcode in self.mcodes]
         
     def get_subdb(self, target_codes):
-        ptns = self._get_mcode_ptns(target_codes)
-        #subdb_mcodes = [mcode for mcode in self.mcodes if self._code_ptn_match(mcode, ptns=ptns)]
-        subdb_mcodes = target_codes
+        subdb_mcodes = [code for code in target_codes if self._code_ptn_match(code)]
         if len(subdb_mcodes) == 0:
             raise ValueError('Invalid code: '+', '.join(target_codes))
         return self.__class__(self.basepath, subdb_mcodes, self._auto_release_interval, self._db_acquire_timeout)

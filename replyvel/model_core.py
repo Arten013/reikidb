@@ -14,6 +14,8 @@ from .policy_match import BUPolicyMatchFactory as PolicyMatchFactory
 from . import _replyvel as replyvel
 from .dataset import SentenceGenerator
 from scipy import cluster, spatial, sparse
+from .utils.logger import get_logger
+from time import time
 
 class TaggedVectors(object):
     def __init__(self, vector_size, vector_type='numpy_array'):
@@ -231,7 +233,29 @@ class JstatutreeModelCore(object):
         if self.path.exists():
             print('remove dir:', self.path)
             shutil.rmtree(self.path)
-    
+
+    def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5, sample_num=500):
+        logger = get_logger(self.__class__.__name__+'.build_match_factory')
+        query = self.db.get_jstatutree(query_key).change_root(query_key)
+        match_factory = match_factory_cls(query, tree_factory=self.rspace_db.get_jstatutree)
+        t = time()
+        rankings = self.most_similar_by_keys([query_key], topn=sample_num)
+        logger.info('leaf retrieve: %s sec/ %d query leaves', str(round(time()-t, 3)), len(rankings))
+        for i, (qtag, ranking) in enumerate(rankings):
+            sims = []
+            for rtag, similarity in ranking:
+                if similarity < theta:
+                    break
+                logger.debug('%s-%s', str(qtag), str(rtag))
+                match_factory.add_leaf(qtag, rtag, similarity)
+                sims.append(similarity)
+            query.find_by_code(qtag).attrib['weight'] = weight_border/(weight_border+sum(sims))
+            logger.info('%03d/%d:add %d leaves similar to %s',i ,len(rankings), len(sims), qtag)
+            logger.info('Currently, %d trees stored in the builder.', len(match_factory.tree_store))
+            if len(sims) > 0:
+                logger.info('Similarity summary: mean %.3f, max %.3f, min %.3f.', sum(sims)/max(len(sims), 1), max(sims), min(sims))
+        return match_factory
+
     def policy_matching(self, keys, theta, activation_func, sample_num=500, **kwargs):
         match_factory = PolicyMatchFactory([self.db.get_element(k) for k in keys], theta, activation_func)
         rankings = self.most_similar_by_keys(keys, topn=sample_num, **kwargs)
@@ -311,6 +335,28 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
         words = [w for s in e.itersentences() for w in s]
         return self._calc_vec(text)
 
+    @property
+    def training_corpus_path(self):
+        return self.path/'training_corpus'
+
+    def get_training_corpus(self):
+        if not self.training_corpus_path.exists():
+            os.makedirs(self.training_corpus_path, exist_ok=True)
+            print('Export corpus file to', self.training_corpus_path)
+            self.db.export_corpus(path=self.training_corpus_path, unit=self.unit)
+        return self.training_corpus_path
+    def is_fitted(self):
+        iterator = self.vecs.iterator(include_key=False, include_value=False)
+        try:
+            print(next(iterator))
+            ret = True
+        except StopIteration:
+            print('not fitted')
+            ret = False
+        finally:
+            del iterator
+        return ret
+
 from sklearn.cluster import KMeans
 class ScikitModelBase(JstatutreeVectorModelBase):
     def _calc_vec(self, text):
@@ -321,25 +367,16 @@ class ScikitModelBase(JstatutreeVectorModelBase):
     def is_fitted(self):
         iterator = self.vecs.iterator(include_key=False, include_value=False)
         try:
-            next(iterator)
+            print(next(iterator))
             ret = True
         except StopIteration:
+            print('not fitted')
             ret = False
         finally:
             del iterator
         return ret
 
-    @property
-    def training_corpus_path(self):
-        return self.path/'training_corpus'
-    
-    def get_training_corpus(self):
-        if not self.training_corpus_path.exists():
-            os.makedirs(self.training_corpus_path, exist_ok=True)
-            print('Export corpus file to', self.training_corpus_path)
-            self.db.export_corpus(path=self.training_corpus_path, unit=self.unit)
-        return self.training_corpus_path
-    
+
     def fit(self, task_size=None): #task_size argument is just for compatibility
         if self.is_fitted():
             print('model already exists.')

@@ -1,23 +1,76 @@
-import jstatutree
 from jstatutree.element import Element
-from jstatutree import Jstatutree
-from pathlib import Path
+from jstatutree import Jstatutree, etypes
 from typing import Generator, Mapping, Union, Sequence
 import math
 import numpy as np
 from collections import OrderedDict
-from .utils.npm_abstracts import AbstractScorer, AbstractActivator, AbstractTraverser
-from .utils.edge import Edge, EdgeStore
+from .utils.npm_abstracts import AbstractScorer, AbstractActivator
+from .utils.edge import Edge, EdgeStore, ParallelizedEdgeStore
 from .utils.logger import get_logger
 from graphviz import Digraph
+from collections import defaultdict
+
+DefaultEdgeColorset = ['forestgreen', 'brown', 'deeppink1', 'cyan', 'gold2', 'crimson']
+
+
+class ParallelScorer(AbstractScorer):
+    def __init__(self):
+        self.scorers = OrderedDict()
+
+    @property
+    def size(self):
+        return len(self.scorers)
+
+    @property
+    def is_parallel(self):
+        return True
+
+    def reformatting_leaf_edges(self, *edges: Edge) -> Sequence[Edge]:
+        for e in edges:
+            if not isinstance(e, np.ndarray):
+                e.score = np.array([e.score] * self.size)
+        return edges
+
+    @property
+    def tags(self):
+        return list(self.scorers.keys())
+
+    def add(self, tag: str, scorer):
+        self.scorers[tag] = scorer
+
+    def add_by_keyvalue(self, keyvalue: Mapping):
+        self.scorers.update(keyvalue)
+
+    def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+        score_list = []
+        for scorer in self.scorers.values():
+            single_score, single_other_results = scorer.scoring(edge, edge_store, **other_results)
+            score_list += [single_score]
+            other_results.update(single_other_results)
+        return np.array(score_list), other_results
 
 
 class PolicyMatchObject(object):
-    def __init__(self):
+    def __init__(self, scorer_tags: Sequence[str]):
         self.units = {}
+        self.scorer_tags = scorer_tags
 
     def add_unit(self, query_tree: Jstatutree, match_tree: Jstatutree, edge_store: EdgeStore):
-        self.units[match_tree.lawdata.code] = PolicyMatchUnit(query_tree, match_tree, edge_store)
+        self.units[str(match_tree.lawdata.code)] = PolicyMatchUnit(query_tree, match_tree, edge_store)
+
+    def ranking(self, threshold: float, topn: int=3, main_tag: str=None):
+        main_tag_idx = 0 if main_tag is None else [i for i, t in enumerate(self.scorer_tags) if t == main_tag][0]
+        results = [(k, list(u.find_matching_edge(threshold))) for k, u in self.units.items()]
+        def rerank(stag: str, results: Sequence[Edge], edge_store: EdgeStore):
+            penalty = 100000000
+            for e in results:
+                penalty = min(max(e.qnode.LEVEL, e.tnode.LEVEL), penalty)
+            return penalty
+        return sorted(results, key=lambda x: rerank(*x[1][main_tag_idx]))[:topn]
+
+    def comp_table(self, threshold: float, topn: int=3, *args, **kwargs):
+        for u in self.ranking(threshold, topn):
+            yield u.comp_table(threshold, *args, **kwargs)
 
 
 class PolicyMatchUnit(object):
@@ -26,34 +79,155 @@ class PolicyMatchUnit(object):
         self.match_tree = match_tree
         self.edge_store = edge_store
 
-    def _tree_name_factory(self, elem: Element) -> str:
-        if str(self.query_tree.lawdata.code) in str(elem.code):
-            return self.query_tree.lawdata.name
-        return self.match_tree.lawdata.name
+    def find_matching_edge(self, threshold: float, query_root: str=None, match_root: str=None) -> list:
+        for stag, edge_store in self.edge_store.items():
+            candidates = edge_store.filtering(key=lambda x: x.score >= threshold
+                                                            and x.qnode.CATEGORY < etypes.CATEGORY_TEXT
+                                                            and x.tnode.CATEGORY < etypes.CATEGORY_TEXT
+                                                            and (query_root is None or query_root in str(x.qnode.code))
+                                                            and (match_root is None or match_root in str(x.tnode.code))
+                                              )
+            results = []
+            def sortkey(e):
+                q = str(e.qnode.code).count('/')
+                t = str(e.tnode.code).count('/')
+                if q > t:
+                    return q, -e.score
+                    #return q, q-t, -e.score
+                else:
+                    return t, -e.score
+                    #return t, t-q, -e.score
+            for e in sorted(candidates, key=sortkey):
+                for r in results:
+                    if r.qnode.code in e.qnode.code:
+                        break
+                else:
+                    results.append(e)
+            yield stag, results, edge_store
 
-    def find_matching_edge(self, threshold: float) -> list:
-        candidates = self.edge_store.filtering(key=lambda x: x.score >= threshold)
-        results = []
-        for e in sorted(candidates, key=lambda e: str(e.qnode.code).count('/')**2+str(e.tnode.code).count('/')**2):
-            for r in results:
-                if r.qnode.code in e.qnode.code:
+    def comp_table(self, threshold: float, *, edge_colorset: Mapping = None, sub_branch: bool=True, query_root: str=None, match_root: str=None, **kwargs) -> Digraph:
+        graph_edge_store = ParallelizedEdgeStore(scorer_tags=list(self.edge_store.keys()))
+        edge_colorset = edge_colorset or {}
+        for i, (tag, edges, edge_store) in enumerate(self.find_matching_edge(threshold, query_root, match_root)):
+            for e in edges:
+                e = self.edge_store.find_edge(e)
+                if e in graph_edge_store:
+                    e.gviz_attrib['label'] = tag+ '・' + e.gviz_attrib['label']
+                    continue
+                e = graph_edge_store.add_edge(e)
+                e.gviz_attrib['label'] = '{}({})'.format(
+                    tag,
+                    ', '.join(
+                        '{0}:{1}'.format(k, round(e.score[j], 3)) for j, k in enumerate(self.edge_store.keys())
+                    )
+                )
+                e.gviz_attrib['color'] = edge_colorset.get(tag, DefaultEdgeColorset[i])
+                e.gviz_attrib['style'] = 'solid'
+                if not sub_branch:
+                    continue
+                for me in edge_store.iter_edges(qkey=str(e.qnode.code), tkey=str(e.tnode.code)):
+                    if me in graph_edge_store or not me.is_leaf_pair():
+                        continue
+                    me = graph_edge_store.add_edge(self.edge_store.find_edge(me))
+                    me.gviz_attrib['label'] = '{0}'.format(round(me.score[0], 3))
+                    # me.gviz_attrib['color'] = edge_colorset.get(tag, DefaultEdgeColorset[i])
+                    me.gviz_attrib['style'] = 'dotted'
+                    me.is_aligner = True
+        factory = CompTableGraphFactory()
+        return factory.construct(
+            self.query_tree.change_root(query_root) if query_root else self.query_tree,
+            self.match_tree.change_root(match_root) if match_root else self.match_tree,
+            graph_edge_store
+        )
+
+    def unit_comp_tables(self, threshold: float, *, sub_branch: bool=True, query_root: str=None, match_root: str=None, **kwargs) -> Digraph:
+        for i, (tag, edges, edge_store) in enumerate(self.find_matching_edge(threshold, query_root, match_root)):
+            for e in edges:
+                graph_edge_store = EdgeStore()
+                e = graph_edge_store.add_edge(e)
+                e.gviz_attrib['label'] = '{0}:{1}'.format(tag, round(e.score, 3))
+                e.gviz_attrib['style'] = 'solid'
+                if not sub_branch:
+                    continue
+                for me in edge_store.iter_edges(qkey=str(e.qnode.code), tkey=str(e.tnode.code)):
+                    if me in graph_edge_store or not me.is_leaf_pair():
+                        continue
+                    me = graph_edge_store.add_edge(me)
+                    me.gviz_attrib['label'] = '{0}:{1}'.format('Similarity', round(me.score, 3))
+                    me.gviz_attrib['style'] = 'dotted'
+                    me.is_aligner = True
+                factory = CompTableGraphFactory()
+                yield tag, e, factory.construct(
+                    self.query_tree.change_root(e.qnode.code),
+                    self.match_tree.change_root(e.tnode.code),
+                    graph_edge_store
+                )
+
+
+class CompTableGraphFactory(object):
+    def construct(self, query_tree: Jstatutree, match_tree: Jstatutree, edges: EdgeStore) -> Digraph:
+        G = Digraph('comptable', filename="hoge")
+        G.body.append('\tgraph [ newrank=true compound=true; ];')
+        G.body.append('\tnodesep=2;')
+        G.body.append('\tlayout="dot";')
+        G.node('Start', label='Start', style='invis')
+        G.node('End', label='End', style='invis')
+
+        colorset = defaultdict(lambda: 'black')
+        colorset.update(
+            {
+                'Article': 'red',
+                'Paragraph': 'darkorchid',
+                'Item': 'darkorchid',
+                'Sentence': 'blue'
+            }
+        )
+        query_graph = self.get_graph(query_tree.getroot(), query_tree.lawdata.name, colorset)
+        target_graph = self.get_graph(match_tree.getroot(), match_tree.lawdata.name, colorset)
+
+        G.subgraph(query_graph['graph'])
+        G.edge('Start', query_graph['head'].code, style='invis')
+        G.edge(query_graph['tail'].code, 'End', style='invis')
+        G.subgraph(target_graph['graph'])
+        G.edge('Start', target_graph['head'].code, style='invis')
+        G.edge(target_graph['tail'].code, 'End', style='invis')
+
+        for edge in edges.iter_edges(qkey=str(query_tree.lawdata.code), tkey=str(match_tree.lawdata.code)):
+            qleaf = self.get_sample_leaf(edge.qnode)
+            tleaf = self.get_sample_leaf(edge.tnode)
+            G.edge(
+                qleaf,
+                tleaf,
+                ltail=("cluster_" + edge.qnode.code) if qleaf != edge.qnode.code else None,
+                lhead=("cluster_" + edge.tnode.code) if tleaf != edge.tnode.code else None,
+                **edge.gviz_attrib
+            )
+
+        max_rank = -1
+        for ql in query_graph['leaves']:
+            if not edges.from_qcode.has_subtrie(str(ql.code)):
+                continue
+            tedges = list(e for e in edges.iter_edges(qkey=ql.code) if e.is_aligner)
+            if len(tedges) == 0:
+                continue
+            tcode = tedges[0].tnode.code
+            for i, tl in enumerate(target_graph['leaves'][max_rank + 1:]):
+                if tl.code == tcode:
+                    max_rank = i + max_rank + 1
+                    G.body.append('{rank=same;' + '"' + ql.code + '"' + '; ' + '"' + tl.code + '"' + ';}')
                     break
-            else:
-                results.append(e)
-        return results
+        return G
 
-    def comp_table(self, threshold: float, **kwargs) -> Digraph:
-        code_pairs = [e.to_tuple(node_as_code=True) for e in self.find_matching_edge(threshold)]
-        print(code_pairs[0])
-        sub_code_pairs = [
-            (sub_edge.qnode.code, sub_edge.tnode.code, sub_edge.score)
-            for qcode, tcode, _ in code_pairs
-            for sub_edge in self.edge_store.leaf_max_match((qcode, tcode)) if sub_edge.is_leaf_pair()
-        ]
-        # qelem = self.bind_by_lca(*qcodes) if len(qcodes) else self.bind_by_lca(*self.queries.keys())
-        return jstatutree.graph.cptable_graph(self.query_tree.getroot(), [self.match_tree.getroot()], code_pairs,
-                                              sub_code_pairs,
-                                              tree_name_factory=self._tree_name_factory, **kwargs)
+    def get_graph(self, elem, lawname, colorset, leaf_edges=True):
+        item = elem.to_dot(lawname=lawname, return_sides=True, colorset=colorset, return_clusters=True,
+                           return_leaves=True, leaf_edges=leaf_edges)
+        assert len(item) == 5, str([type(v) for v in item])
+        return {k: v for k, v in zip(['graph', 'head', 'tail', "clusters", "leaves"], item)}
+
+    @staticmethod
+    def get_sample_leaf(node: Element):
+        leaves = list(node.iterXsentence_code())
+        return leaves[len(leaves) // 2]
 
 
 class SimilarityActivator:
@@ -79,11 +253,12 @@ class PolicyMatchFactory(object):
         self.tree_factory = tree_factory
         self.leaf_edge_store = EdgeStore()
 
-    def matching(self, scorer, traverser_cls, activator, * , least_matching_node=0):
+    def matching(self, scorer, traverser_cls, activator, *, least_matching_node=0):
         logger = get_logger('PolicyMatchFactory.matching')
         logger.info('matching() called')
-        obj = PolicyMatchObject()
-        for target_tree, matching_edge_store in self.scoring(scorer, traverser_cls, activator, least_matching_node=least_matching_node):
+        obj = PolicyMatchObject(scorer.tags)
+        for target_tree, matching_edge_store in self.scoring(traverser_cls, scorer, activator,
+                                                             least_matching_node=least_matching_node):
             obj.add_unit(self.query_tree, target_tree, matching_edge_store)
         logger.info('matching() finished')
         return obj
@@ -96,20 +271,23 @@ class PolicyMatchFactory(object):
             self.tree_store[rcode] = self.tree_factory(rcode)
         tnode = self.tree_store[rcode].find_by_code(tcode)
         logger.debug("add edge %s %s %f", str(qnode.code), str(tnode.code), similarity)
-        self.leaf_edge_store.add_edge(qnode, tnode, similarity)
+        self.leaf_edge_store.add(qnode, tnode, similarity)
 
     def scoring(self, traverser_cls, scorer: AbstractScorer, activator: AbstractActivator, *, least_matching_node=0):
-        logger = get_logger('PolicyMatchFactory.scoring')
+        logger = get_logger('PolicyMatchFactory.scoring') # todo: drop children
         for target_code, target_tree in self.tree_store.items():
             if least_matching_node > 0 and \
                     len(list(self.leaf_edge_store.iter_edges(tkey=target_code))) < least_matching_node:
-                logger.info('skip(single node matching): %s', str(target_code))
+                logger.debug('skip(single node matching): %s', str(target_code))
                 continue
             logger.info('scoring %s', target_tree.lawdata.code)
             target = target_tree.getroot()
             edges = list(self.leaf_edge_store.iter_edges(tkey=target.code))
-            reformatted_edges = scorer.reformatting_leaf_edges(edges)
-            matching_edge_store = activator.initial_edges(*reformatted_edges)
+            # reformatted_edges = scorer.reformatting_leaf_edges(*edges)
+            matching_edge_store = activator.initial_edges(edges)
+            if isinstance(scorer, ParallelScorer):
+                matching_edge_store = ParallelizedEdgeStore.copy_from_edge_store(matching_edge_store,
+                                                                                 list(scorer.scorers.keys()))
             logger.debug('initial edge store size: %d', len(matching_edge_store))
             traverser = traverser_cls(self.query_tree.getroot(), target, matching_edge_store).traverse()
             edge = next(traverser)
@@ -117,186 +295,9 @@ class PolicyMatchFactory(object):
                 if edge is None:
                     break
                 edge.score = scorer.scoring(edge, matching_edge_store)[0]
-                matching_edge_store.add_edge(*edge.to_tuple())
-                logger.info('add edge: %s', str(edge))
+                matching_edge_store.add(*edge.to_tuple())
+                logger.debug('add edge: %s', str(matching_edge_store.find_edge(edge)))
                 edge = traverser.send(edge.score)
             logger.info('finished scoring %s', target_tree.lawdata.code)
             yield target_tree, matching_edge_store
         logger.debug('quit')
-
-
-class Alternately:
-    class Traverser(AbstractTraverser):
-        def get_target_parent(self, tnode: Element) -> Union[None, Element]:
-            target_parent = self.target.find_by_code(str(Path(tnode.code).parent))
-            if target_parent is not None and len(target_parent) == len(tnode):
-                return self.get_target_parent(target_parent)
-            return target_parent
-
-        def get_query_parent(self, qnode: Element) -> Union[None, Element]:
-            query_parent = self.query.find_by_code(str(Path(qnode.code).parent))
-            if query_parent is not None and len(query_parent) == len(qnode):
-                return self.get_query_parent(query_parent)
-            return query_parent
-
-        def traverse(self) -> Generator:
-            logger = get_logger('Alternately.Traverser.traverse')
-            logger.debug('Initial queue size: %d', self.edge_queue.qsize())
-            while not self.edge_queue.empty():
-                edge = self.edge_queue.get()
-                if not edge.is_leaf_pair():
-                    if edge in self.edge_store:
-                        logger.debug('skip: already scored')
-                        #logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
-                        continue
-                    logger.debug('yield edge %s', str(edge))
-                    score = yield edge # todo: implement halt(score, edges)
-                parent_qnode = self.get_query_parent(edge.qnode)
-                parent_tnode = self.get_target_parent(edge.tnode)
-                if parent_qnode:
-                    self.edge_queue.put(Edge(parent_qnode, edge.tnode, 0))
-                if parent_tnode:
-                    self.edge_queue.put(Edge(edge.qnode, parent_tnode, 0))
-                if parent_qnode and parent_tnode:
-                    # self.edge_queue.put(Edge(parent_qnode, parent_tnode, 0))
-                    pass
-            yield None
-
-
-    class Scorer(object):
-        class ParallelScorer(AbstractScorer):
-            def __init__(self):
-                self.scorers = OrderedDict()
-
-            @property
-            def size(self):
-                return len(self.scorers)
-
-            @property
-            def is_parallel(self):
-                return True
-
-            def reformatting_leaf_edges(self, *edges: Sequence[Edge]) -> Sequence[Edge]:
-                for e in edges:
-                    if not isinstance(e, np.ndarray):
-                        e.score = np.array([e.score]*self.size)
-                return edges
-
-            def add(self, tag: str, scorer):
-                self.scorers[tag] = scorer
-
-            def add_by_keyvalue(self, keyvalue: Mapping):
-                self.scorers.update(keyvalue)
-
-            def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
-                score_list = []
-                for scorer in self.scorers:
-                    single_score, single_other_results = scorer.scoring(edge, edge_store, **other_results)
-                    score_list += [single_score]
-                    other_results.update(single_other_results)
-                return np.array(score_list), other_results
-
-        class LinearCombination(AbstractScorer):
-            def __init__(self):
-                self.scorers = []
-
-            def add(self, scorer, weight):
-                self.scorers.append((scorer, weight))
-
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                score = 0.0
-                for scorer, weight in self.scorers:
-                    single_score, single_other_results = scorer.scoring(edge, edge_store, **other_results)
-                    score += single_score * weight
-                    other_results.update(single_other_results)
-                return score, other_results
-
-        class GeometricMean(AbstractScorer):
-            def __init__(self):
-                self.scorers = []
-
-            def add(self, scorer):
-                self.scorers.append(scorer)
-
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                score = 1.0
-                for scorer in self.scorers:
-                    single_score, single_other_results = scorer.scoring(edge, edge_store, **other_results)
-                    score *= single_score
-                    other_results.update(single_other_results)
-                return math.pow(score, 1.0/len(self.scorers)), other_results
-
-        class QueryLeafCoverage(AbstractScorer):
-            def __init__(self, using_qweight=False):
-                self.using_qweight = using_qweight
-
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
-                if self.using_qweight:
-                    qleaf_num = sum(edge.qnode.find_by_code(c).attrib.get('weight', 1.0)
-                                    for c in edge.qnode.iterXsentence_code())
-                else:
-                    qleaf_num = sum(1 for _ in edge.qnode.iterXsentence(include_code=False, include_value=False))
-                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
-                other_results['leaf_max_match'] = matching
-                match_num = len(matching)
-                score = match_num / qleaf_num
-                logger.debug('%d/%d = %f',match_num, qleaf_num, score)
-                return score, other_results
-
-        class TargetLeafCoverage(AbstractScorer):
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                logger = get_logger('Alternately.Scorer.TargetLeafCoverage.scoring')
-                tleaf_num = sum(1 for _ in edge.tnode.iterXsentence(include_code=False, include_value=False))
-                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
-                other_results['leaf_max_match'] = matching
-                match_num = len(matching)
-                score = match_num/tleaf_num
-                logger.debug('%d/%d = %f',match_num, tleaf_num, score)
-                return score, other_results
-
-        class QueryLeafProximity(AbstractScorer):
-            def __init__(self, using_qweight=False):
-                self.using_qweight = using_qweight
-
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
-                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
-                other_results['leaf_max_match'] = matching
-                proximity_list = list()
-                current_proximity = 0.0
-                for e in edge.qnode.iterXsentence_elem():
-                    for edge in matching:
-                        if e.code == edge.qnode.code:
-                            proximity_list.append(current_proximity)
-                            break
-                    else:
-                        if self.using_qweight:
-                            current_proximity += e.attrib.get('weight', 1.0)
-                        else:
-                            current_proximity += 1
-                proximity_list.append(current_proximity)
-                score = 1/(1+max(proximity_list))
-                logger.debug('1/(1+%d) = %f',max(proximity_list), score)
-                return score, other_results
-
-        class TargetLeafProximity(AbstractScorer):
-            def scoring(self, edge:Edge, edge_store: EdgeStore, **other_results):
-                logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
-                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
-                other_results['leaf_max_match'] = matching
-                proximity_list = list()
-                current_proximity = 0.0
-                for e in edge.tnode.iterXsentence_elem():
-                    for edge in matching:
-                        if e.code == edge.tnode.code:
-                            proximity_list.append(current_proximity)
-                            break
-                    else:
-                        current_proximity += 1
-                proximity_list.append(current_proximity)
-                score = 1/(1+max(proximity_list))
-                logger.debug('1/(1+%d) = %f',max(proximity_list), score)
-                return score, other_results
-
-

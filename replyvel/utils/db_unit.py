@@ -60,7 +60,7 @@ class WriteBatch(object):
         
     def put(self, *args, **kwargs):
         return self.wb.put(*args, **kwargs)
-    
+
 class Iterator(object):
     def __init__(self, udb, *args, **kwargs):
         self.udb = udb
@@ -78,11 +78,14 @@ class Iterator(object):
                     pass
             self.iterator = self.udb.db.iterator(*self.args, **self.kwargs)
             yield from self.iterator
+            #items = list(self.iterator)
+            #print(self.kwargs.get('prefix') or 'NO PREFIX', items[:5], '...' if len(items) > 5 else '')
+            #yield from items
         finally:
             self.close()
     
     def close(self):
-        self.udb.release()
+        self.udb.restart_releaser()
         del self.iterator
         self.iterator = None
 
@@ -205,7 +208,7 @@ class DBUnit(object):
                 if self._release_time != rt:
                     #print('changed from', rt, 'to', self._release_time)
                     rt = self._release_time
-                self.lock.wait(timeout=0.1)
+                self.lock.wait(timeout=1)
             self._db.close()
             del self._db
             self._db = None
@@ -262,8 +265,8 @@ class DBUnit(object):
         return self.db.delete(key)
 
     @load_leveldb_deco(release_interval=INF_RELEASE_TIME)
-    def iterator(self, include_key=True, include_value=True):
-        return Iterator(self, include_key=include_key, include_value=include_value)
+    def iterator(self, include_key=True, include_value=True, prefix=None):
+        return Iterator(self, include_key=include_key, include_value=include_value, prefix=prefix)
 
     @load_leveldb_deco(release_interval=INF_RELEASE_TIME)
     def write_batch(self, *args, **kwargs):
@@ -273,7 +276,7 @@ class DBUnit(object):
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, exc_type, exc_value, tb):
         if exc_type:
             raise
         self.release()

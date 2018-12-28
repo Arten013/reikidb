@@ -23,7 +23,9 @@ import simstring
 import hashlib
 from .policy_match import BUPolicyMatchFactory as PolicyMatchFactory
 from fastText import train_unsupervised
-
+import joblib
+from .utils.logger import get_logger
+from time import time
 
 class TfIdf(ScikitModelBase):
     MODEL_TYPE_TAG = 'tfidf'
@@ -49,7 +51,7 @@ class TfIdf(ScikitModelBase):
         submodel.transformer = self.transformer
         return submodel
 
-    
+
 class LSI(ScikitModelBase):
     MODEL_TYPE_TAG = 'lsi'
     def __init__(self, db, tag, vocab_size=16000, idf=True, vector_size=300, unit='XSentence'):
@@ -86,22 +88,36 @@ class LSI(ScikitModelBase):
 
 class FastText(JstatutreeVectorModelBase):
     MODEL_TYPE_TAG = 'fasttext'
-    def __init__(self, db, tag, wvmodel_path, vector_size=None, unit='XSentence', workers=None):
-        self.wvmodel_path = wvmodel_path
+    def __init__(self, db, tag, vector_size=None, unit='XSentence', workers=None, wvmodel_path=None):
+        self._wvmodel_path = wvmodel_path or None
         self._wvmodel = None
         self.workers = workers or cpu_count()
-        vector_size = vector_size or self.wvmodel.vector_size
+        self.db = db
+        self.tag = tag
+        if self.wvmodel is None:
+            vector_size = vector_size or 300
+        else:
+            vector_size = vector_size or self.wvmodel.vector_size
         super().__init__(db, tag, vector_size, unit)
         
     def get_submodel(self, *mcodes):
         submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.wvmodel_path, self.vector_size, self.unit, self.workers)
         submodel.reload_tagged_vectors()
         return submodel
-    
+
+    @property
+    def wvmodel_path(self):
+        return self._wvmodel_path or self.path/'fasttext'/'model.bin'
+
     @property
     def wvmodel(self):
         if self._wvmodel is None:
-            self._wvmodel = gensim.models.FastText.load_fasttext_format(self.wvmodel_path)
+            try:
+                self._wvmodel = gensim.models.FastText.load_fasttext_format(str(self.wvmodel_path))
+            except:
+                traceback.print_exc()
+                print('wvmodel auto load failed', self.wvmodel_path)
+                pass
         return self._wvmodel
     
     def save(self):
@@ -130,6 +146,7 @@ class FastText(JstatutreeVectorModelBase):
         print('<proc {}>'.format(pid), 'task begin', db.mcodes)
         with self.vecs.get_subdb(mcodes).write_batch(transaction=True, sync=True) as wb:
             for tag, words in SentenceGenerator(db, self.unit, True):
+                wv_sum = None
                 try:
                     wv_sum = np.sum(np.array([self.wvmodel[w]for w in words if w in self.wvmodel.wv]), axis=0)
                     if wv_sum.shape != (self.vector_size,):
@@ -139,8 +156,9 @@ class FastText(JstatutreeVectorModelBase):
                 except FloatingPointError:
                     print('skip')
                     print(traceback.format_exc())
-                    print(wv_sum, type(wv_sum))
-                    pprint(wv_sum)
+                    if wv_sum is not None:
+                        print(wv_sum, type(wv_sum))
+                        pprint(wv_sum)
             print('<proc {}>'.format(pid), "begin sync write")
         print('<proc {}>'.format(pid), 'task finished')
         return mcodes
@@ -155,12 +173,14 @@ class FastText(JstatutreeVectorModelBase):
             return
         print('Training begin')
         if self.wvmodel is None:
+            os.makedirs(self.wvmodel_path.parent, exist_ok=True)
             print("training fasttext model")
             model = train_unsupervised(
                 input=str(self.get_training_corpus()/'corpus.txt'),
                 model='skipgram',
+                dim = self.vector_size
             )
-            model.save_model(str(self.get_training_corpus()/'model.bin'))
+            model.save_model(str(self.wvmodel_path))
             del model
         
         target_mcodes = sorted(self.db.mcodes, key=lambda x: int(x))
@@ -186,19 +206,46 @@ class FastText(JstatutreeVectorModelBase):
 
 class FastTextWMD(FastText):
     def _calc_vec(self, text):
-        raise "WMD model do not using vector"
+        raise Exception("WMD model do not using vector")
     
     def get_wmd(self, tag1, tag2):
-        return round(
+        t = time()
+        wmd = round(
             self.wvmodel.wmdistance(
                 [word for sentence in self.db.get_element(tag1).itersentence() for word in sentence], 
-                [word for sentence in self.db.get_element(tag2).itersentence() for word in sentence], 
-            3)
+                [word for sentence in self.db.get_element(tag2).itersentence() for word in sentence]
+            )
         )
+        get_logger('FastTextWMD.get_wmd()').info('time: %.03f', time()-t)
+        print(type(wmd), )
+        return wmd
             
     def _vector_production(self, mcodes):
-        raise "WMD model do not using vector"
-            
+        raise Exception("WMD model do not using vector")
+
+    def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5, sample_num=500):
+        logger = get_logger(self.__class__.__name__+'.build_match_factory')
+        query = self.db.get_jstatutree(query_key).change_root(query_key)
+        match_factory = match_factory_cls(query, tree_factory=self.rspace_db.get_jstatutree)
+        t = time()
+        rankings = list(self.most_similar_by_keys([query_key], topn=sample_num, sample_num=sample_num))
+        logger.info('leaf retrieve: %s sec/ %d query leaves', str(round(time()-t, 3)), len(rankings))
+        for i, (qtag, ranking) in enumerate(rankings):
+            sims = []
+            for rtag, similarity in ranking:
+                if similarity < theta:
+                    break
+                logger.debug('%s-%s', str(qtag), str(rtag))
+                match_factory.add_leaf(qtag, rtag, similarity)
+                sims.append(similarity)
+            query.find_by_code(qtag).attrib['weight'] = weight_border/(weight_border+sum(sims))
+            logger.info('%03d/%d:add %d leaves similar to %s',i ,len(rankings), len(sims), qtag)
+            logger.info('Currently, %d trees stored in the builder.', len(match_factory.tree_store))
+            if len(sims) > 0:
+                logger.info('Similarity summary: mean %.3f, max %.3f, min %.3f.', sum(sims)/max(len(sims), 1), max(sims), min(sims))
+        return match_factory
+
+
     def most_similar_by_keys(self, keys, topn=10, name_as_tag=False, append_text=False, sample_num=None):
         if not sample_num or sample_num < topn:
             sample_num = topn*10
@@ -211,22 +258,14 @@ class FastTextWMD(FastText):
                 qtag, 
                 sorted([(t, self.get_wmd(qtag, t)) for t, d in ranking], key=lambda x: x[1])[:topn]
             )
-                for qtag, ranking in zip(ukeys, self.tagged_vectors.knn(query_vectors, k=wmd_topn))
+                for qtag, ranking in zip(ukeys, self.tagged_vectors.knn(query_vectors, k=sample_num))
         ]
         for qtag, tag_dist_pairs in rankings:
             #print(tag_dist_pairs)
             ranking = tag_dist_pairs
             tag2sent = lambda x: ''.join([re.sub('▁', '', w) for s in self.db.get_element(x).itersentence() for w in s])
             if append_text:
-                ranking = (
-                    (t, d, tag2sent(t), olap_func(tag2sent(t), tag2sent(qtag), olap_ngram)) if append_olap else (t, d, tag2sent(t))
-                      for t, d in ranking  
-                )
-            elif append_olap:
-                ranking = (
-                    (t, d, olap_func(tag2sent(t), tag2sent(qtag), olap_ngram))
-                      for t, d in ranking  
-                )
+                ranking = ((t, d, tag2sent(t)) for t, d in ranking)
             if name_as_tag:
                 ranking = ((self.db.get_element_name(x[0], x[0]), *x[1:]) for x in ranking)
             ret.append(list(ranking))
@@ -264,6 +303,7 @@ class SimString(JstatutreeModelCore):
             self.simstring = None
 
     def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5):
+        logger = get_logger(self.__class__.__name__+'.build_match_factory')
         query = self.db.get_jstatutree(query_key).change_root(query_key)
         if self.rspace_reversed_dict is None:
             self.restrict_rspace(self.db.mcodes)
@@ -281,6 +321,10 @@ class SimString(JstatutreeModelCore):
                              for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
                              ])
             query.find_by_code(qkey).attrib['weight'] = weight_border/(weight_border+np.sum(sims))
+            logger.info('%03d/%d:add %d leaves similar to %s',i ,len(usents), len(sims), qkey)
+            logger.info('Currently, %d trees stored in the builder.', len(match_factory.tree_store))
+            if sims.shape[0] > 0:
+                logger.info('Similarity summary: mean %.3f, max %.3f, min %.3f.', np.sum(sims)/max(sims.shape[0], 1), np.max(sims), np.min(sims))
         return match_factory
 
     def policy_matching(self, keys, theta, activation_func, topn=10, weight_query_by_rescount=True, weight_border=5, **kwargs):

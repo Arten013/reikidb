@@ -15,7 +15,9 @@ from jstatutree.lawdata import ReikiCode
 from multiprocessing import cpu_count
 
 from . import _replyvel as replyvel
-
+from .utils.logger import get_logger
+from pygtrie import StringTrie
+from time import time
 
 
 class SentenceGenerator(object):
@@ -29,7 +31,9 @@ class SentenceGenerator(object):
     
     def __iter__(self):
         if self.unit == 'XSentence':
-            sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.iterXsentence(include_code=True) if v is not None and len(v) > 0)
+            sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.getroot().iterXsentence(include_code=True) if v is not None and len(v) > 0)
+        elif self.unit == 'Sentence':
+            sg = ((k, v) for t in self.db.iter_jstatutree(include_tag=False) for k, v in t.getroot().itersentence(include_code=True) if v is not None and len(v) > 0)
         else:
             sg =  ((k, v) for k, v in self.db.iter_element_sentences(self.unit, include_tag=True) if v is not None and len(v) > 0)
         if self.include_key:
@@ -41,9 +45,11 @@ class JstatutreeDB(object):
     def __init__(self, path, target_codes='ALL'):
         self.path = Path(path)
         self.target_codes = target_codes
-        self.jstatutree_db = replyvel.DB(Path(self.path, 'jstatutree'), target_codes=self.target_codes) 
+        self.jstatutree_db = replyvel.DB(Path(self.path, 'jstatutree'), target_codes=self.target_codes)
         self.element_db = {e.__name__: replyvel.DB(Path(self.path, "elements", e.__name__), target_codes=self.target_codes) for e in ETYPES}
-    
+        self._preloaded_elements = StringTrie()
+        self._preloaded_codes = []
+
     @property
     def mcodes(self):
         return self.jstatutree_db.mcodes
@@ -85,7 +91,7 @@ class JstatutreeDB(object):
     
     def split_by_dbcount(self, dbcount):
         db_size = ( len(list(self.mcodes)) + (dbcount-1))//dbcount
-        return self.split_by_dbsize(dbsize)
+        return self.split_by_dbsize(db_size)
 
     def split_by_dbsize(self, dbsize):
         entire_mcodes = sorted(self.mcodes, key=lambda x: int(x))
@@ -101,7 +107,7 @@ class JstatutreeDB(object):
     def put_jstatutree(self, jstree):
         root = jstree.getroot()
         self.put_element(root)
-        jstree._root = root.code
+        # jstree._root = root.code
         self.jstatutree_db.put(str(jstree.lawdata.code), jstree)
         
     def put_element(self, element):
@@ -128,33 +134,62 @@ class JstatutreeDB(object):
         return default
     
     def get_jstatutree(self, code, default=None):
+        t = time()
         code = str(ReikiCode(code))
         jstree = self.jstatutree_db.get(code, None)
         if not jstree:
             return default
-        jstree._root = self.get_element(jstree._root, [])
+        #jstree._root = self.get_element(jstree._root, None)
+        get_logger('dataset.JstatutreeDB.get_jstatutree()').debug('time: %f sec', round(time()-t, 3))
+        if jstree._root is None:
+            return default
         return jstree
-    
-    def get_element(self, code, default=None):
+
+    PRELOAD_SIZE = 1000000
+    def load_element(self, code:str):
+        code = str(code)
+        if code[:14] not in self._preloaded_codes:
+            if len(self._preloaded_elements) > self.PRELOAD_SIZE:
+                get_logger('dataset.JstatutreeDB.load_element()').info('discard _preloaded_elements(size: %d)', len(self._preloaded_elements))
+                self._preloaded_elements = StringTrie()
+                self._preloaded_codes = []
+            self._preloaded_codes.append(code[:14])
+            for etype in ['Sentence', 'Article', 'Paragraph', 'ParagraphSentence', 'Column']:
+                # etype = etype.__name__
+                #print(etype)
+                for cc, ce in self.element_db[etype].iterator(include_key=True, include_value=True, prefix=code[:14]):
+                    self._preloaded_elements[str(cc)] = ce
+                    get_logger('').debug('preload: '+repr(ce))
+        ret = self._preloaded_elements.get(code, None)
+        if ret is None:
+           ret = self.element_db[code2etype(code)].get(code, None)
+        else:
+            get_logger('dataset.JstatutreeDB.load_element()').debug('use preloaded: '+code)
+        return ret
+
+    def get_element(self, code, default=None, *, _use_preload=False):
         code = str(code)
         etype = code2etype(code)
-        if code2etype(code) not in self.element_db:
+        if etype not in self.element_db:
             print("Warning: Non-element object accessed from the function get_element()")
             print("Key:", code, "recognized as etype", etype)
             ret = self.get_jstatutree(code, None)
             return None if ret is None else ret.getroot()
-        elem = self.element_db[etype].get(code)
+        if _use_preload:
+            elem = self.load_element(code)
+        else:
+            elem = self.element_db[etype].get(code, None)
         if elem is None:
             return default
         return self._complete_element(elem)
     
     def get_element_name(self, code, default=None):
-        etype = code2etype(str(code))
         lawcode = ReikiCode(code)
         lawname = self.jstatutree_db.get(str(lawcode)).lawdata.name
         return lawname+code2jname(str(code))
         
     def _complete_element(self, elem):
+        return elem
         if len(elem):
             elem._children = [self[child_code] for child_code in elem]
             assert None not in elem._children, 'Incomplete Element: ' + str(elem.code) + "\n" + str(list(elem)) 
@@ -171,7 +206,7 @@ class JstatutreeDB(object):
             yield self._complete_element(elem)
             
     def iter_elements(self, target_etype, include_tag=True):
-        #if target_etype == 'Xsentence':
+        # if target_etype == 'Xsentence':
         #    yield from self.iter_Xsentence(self, )
         for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
             yield self._complete_element(elem)
@@ -186,14 +221,18 @@ class JstatutreeDB(object):
     def iter_jstatutree(self, include_tag=True, include_value=True, target_codes=None):
         if not include_value:
             return self.iter_lawcodes(target_codes=target_codes)
+        t = time()
         for jst in self.jstatutree_db.iterator(include_key=False, include_value=True, target_codes=target_codes):
-            jst._root = self.get_element(jst._root)
+            get_logger('dataset.JstatutreeDB.iter_jstatutree()').debug('time: %f sec', round(time()-t, 3))
+            # jst._root = self.get_element(jst._root)
             yield (str(jst.lawdata.code), jst) if include_tag else jst
+            t = time()
     
     def write_batch(self, *args, **kwargs):
         return JstatutreeBatchWriter(self, *args, **kwargs)
     
     def write_batch_muni(self, path, print_log=False, error_detail=True, print_skip=False, only_reiki=True, *wbargs, **wbkwargs):
+        logger = get_logger('<proc:{1}>{0}write_batch_muni'.format(str(self.__class__), str(os.getpid())))
         path = Path(path)
         mcode = path.name
         assert re.match('\d{6}', mcode), 'Inappropriate path: '+str(path)
@@ -205,16 +244,15 @@ class JstatutreeDB(object):
                     jstree = Jstatutree(path)
                     if (not only_reiki) or jstree.lawdata.is_reiki():
                         wb.put_jstatutree(jstree)
-                        print_log and print('add:', path, jstree.lawdata.name)
+                        logger.debug('add: %s %s', path, jstree.lawdata.name)
                     else:
-                        (print_log or print_skip) and print('skip (Not Reiki):', path, jstree.lawdata.lawnum)
+                        logger.debug('skip (Not Reiki): %s %s', path, jstree.lawdata.lawnum)
                 except LawError as e:
                     if print_log or error_detail:
-                        print('skip (Structure Error):', path)
-                        if error_detail:
-                            print(e)
+                        logger.debug('skip (Structure Error):', path)
+                        logger.debug('error detail: %s', str(e))
                 except ET.ParseError as e:
-                    print_log and print('skip (Parse Error):', path)
+                    logger.warning('skip (Parse Error):', path)
                 except Exception as e:
                     raise e
 
@@ -237,6 +275,7 @@ class MultiProcWriter(object):
                 self.write_batch_pref_directory(pref_path, print_log, error_detail, print_skip, only_reiki, *wbargs, **wbkwargs)
             
     def write_batch_pref_directory(self, pref_path, print_log=False, error_detail=True, print_skip=True, only_reiki=True, *wbargs, **wbkwargs):
+        logger = get_logger('MultiProcWriter.write_batch_pref_directory')
         with concurrent.futures.ProcessPoolExecutor(self.workers) as executor:
             futures = []
             for muni_path in Path(pref_path).iterdir():
@@ -245,10 +284,9 @@ class MultiProcWriter(object):
                 mcode = Path(muni_path).name
                 if not self.db.jstatutree_db._code_ptn_match(mcode):
                     continue
-                print(mcode)
                 try:
                     subdb = self.db.get_subdb( [mcode])
-                    print('submit path:', muni_path)
+                    logger.info('submit: %s', str(mcode))
                     futures.append(
                         executor.submit(
                             subdb.write_batch_muni,
@@ -262,9 +300,11 @@ class MultiProcWriter(object):
                         )
                     )
                     if len(futures) > 30:
+                        logger.info('wait task finishing')
                         while len(futures) > 20:
                             _, futures = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         futures = list(futures)
+                        logger.info('restart')
                 except ValueError:
                     print(traceback.format_exc())
                     pass
@@ -319,8 +359,11 @@ class TokenizedJstatutreeDB(JstatutreeDB):
                     with concurrent.futures.ProcessPoolExecutor(workers) as executor:
                         futures = [executor.submit(SentenceGenerator(subdb, unit, True).sentence_list) for subdb in db_batch]
                         for future in concurrent.futures.as_completed(futures):
-                            [(sf.writelines(''.join(' '.join(sent).rstrip()+'\n')) , tf.writelines(tag+'\n')) for tag, sent in future.result()]
-                
+                            for tag, sent in future.result():
+                                #print(sent)
+                                sf.writelines(''.join(' '.join(sent).rstrip()+'\n'))
+                                tf.writelines(tag+'\n')
+
     def put_element(self, element):
         assert isinstance(element, Element)
         if element.etype == 'Sentence':
@@ -335,21 +378,29 @@ class TokenizedJstatutreeDB(JstatutreeDB):
     def get_jstatutree(self, code, default=None):
         code = str(ReikiCode(code))
         jstree = self.jstatutree_db.get(code, None)
+        for e in jstree.iter('Sentence'):
+            e.text = self.tokenizer.tokenize(e.text)
         if not jstree:
             return default
-        jstree._root = self.get_element(jstree._root, [])
+        #jstree._root = self.get_element(jstree._root, [])
         return jstree
     
     def _complete_element(self, elem):
-        elem._children = [self.get_element(child_code, None) for child_code in list(elem)]
-        if elem.etype == 'Sentence':
-            elem.text = self.sentence_db.get(elem.code, elem.text)
+        for e in elem.iter('Sentence'):
+            if isinstance(e.text, str):
+                e.text = self.tokenizer.tokenize(e.text)
         return elem
     
     #def iter_elements(self, target_etype, include_tag=True):
     #    for elem in self.element_db[target_etype].iterator(include_key=False, include_value=True):
     #        yield self._complete_element(elem)
-    
+
+    def iter_jstatutree(self, include_tag=True, include_value=True, target_codes=None):
+        for t in super().iter_jstatutree(include_tag, include_value, target_codes):
+            t._root = self._complete_element(t._root)
+            yield t
+
+
     def iter_element_sentences(self, target_etype, include_tag=True):
         for elem in self.iter_elements(target_etype, False):
             ret = [w for s in elem.itersentence() for w in s]

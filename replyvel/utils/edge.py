@@ -10,6 +10,7 @@ from collections import Counter
 import numpy as np
 from typing import Sequence, Union, Any, NewType, Callable, TypeVar
 import copy
+import re
 
 EdgeScoreType = NewType('EdgeScoreType', Union[float, np.ndarray])
 X = TypeVar('X')
@@ -108,10 +109,10 @@ class EdgeStoreCore(object):
         except KeyError:
             logger = get_logger('EdgeStore._iter_idx_from_code')
             if is_qcode:
-                logger.warning('KeyError has raised for qcode: %s', str(code))
+                logger.debug('KeyError has raised for qcode: %s', str(code))
                 logger.debug('key list: \n %s', '\n'.join(self.from_qcode.keys()))
             else:
-                logger.warning('KeyError has raised for tcode: %s', str(code))
+                logger.debug('KeyError has raised for tcode: %s', str(code))
                 logger.debug('key list: \n %s', '\n'.join(self.from_tcode.keys()))
             return set()
 
@@ -159,11 +160,22 @@ class EdgeStoreCore(object):
         self.edge_count_per_tree[tnode.code[:14]] += 1
         return edge
 
+    def is_lca_pair_edge(self, edge: Edge) -> bool:
+        valid_qkeys = set(k for k, ids in self.from_qcode.items() if sum(1 for i in ids if self._edges[i] is not None) > 0)
+        valid_tkeys = set(k for k, ids in self.from_tcode.items() if sum(1 for i in ids if self._edges[i] is not None) > 0)
+        retrieved_tkeys = set(e.tnode.code for e in self.iter_edges(qkey=edge.qnode.code))
+        if valid_tkeys != retrieved_tkeys:
+            return False
+        retrieved_qkeys = set(e.qnode.code for e in self.iter_edges(tkey=edge.tnode.code))
+        if valid_qkeys != retrieved_qkeys:
+            return False
+        return True
+
     def iter_edges(self, *, qkey: str = None, tkey: str = None):
         qcode = qkey.code if isinstance(qkey, Element) else qkey
         tcode = tkey.code if isinstance(tkey, Element) else tkey
         if qcode is None and tcode is None:
-            yield from [e for i, e in enumerate(self._edges) if self._check_edge_idx(i)]
+            yield from [e for i, e in enumerate(self._edges) if self._check_edge_idx(i)] #todo: list -> generator
         else:
             qedge_indices, tedge_indices = set(), set()
             if qcode is not None:

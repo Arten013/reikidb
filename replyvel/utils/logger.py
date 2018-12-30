@@ -9,7 +9,7 @@ _default_handler.setFormatter(_default_formatter)
 
 def get_logger(module_name):
     logger = logging.getLogger(module_name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.addHandler(_default_handler)
     logger.propagate = True
     return logger

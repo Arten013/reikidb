@@ -314,7 +314,7 @@ class SimString(JstatutreeModelCore):
             ss.measure = self.method
             ss.threshold = theta
         usents = {uk: sent for uk, sent in query.iterXsentence(include_code=True, include_value=True)}
-        for qkey, qsent in usents.items():
+        for i, (qkey, qsent) in enumerate(usents.items()):
             sims = np.array([(not match_factory.add_leaf(qkey, skey, sim)) or sim
                              for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
                              for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if str(skey) not in str(query.lawdata.code)

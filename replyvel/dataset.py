@@ -327,15 +327,20 @@ class MultiProcWriter(object):
                 futures = []
         executor.shutdown(wait=True)
 
+def deprecate(func):
+    def wrapper(*args, **kwargs):
+        raise Exception('Deprecated.')
+
 class TokenizedJstatutreeDB(JstatutreeDB):
     def __init__(self, path, tokenizer, target_codes='ALL'):
         super().__init__(path, target_codes)
         self.tokenizer = tokenizer
-        self.sentence_db = replyvel.DB(Path(self.path, "texts", self.tokenizer.tag, "Sentence"), target_codes=self.target_codes) 
+        #self.sentence_db = replyvel.DB(Path(self.path, "texts", self.tokenizer.tag, "Sentence"), target_codes=self.target_codes)
         
     def get_normal_db(self):
         return JstatutreeDB(self.path, self.target_codes)
-        
+
+    @deprecate
     def tokenize_batch(self, overwrite=False, *args, **kwargs):
         with self.sentence_db.write_batch(*args, **kwargs) as wb:
             for e in self.iter_elements('Sentence'):
@@ -343,7 +348,7 @@ class TokenizedJstatutreeDB(JstatutreeDB):
                     wb.put(e.code, [])
                 if overwrite or isinstance(e.text, str):
                     wb.put(e.code, self.tokenizer.tokenize(e.text))
-                    
+
     def export_corpus(self, unit, path=None, workers=None, batch_size=30):
         corpus_path = Path((path or self.path)/'corpus.txt')
         tag_path = Path((path or self.path)/'tags.txt')
@@ -363,7 +368,7 @@ class TokenizedJstatutreeDB(JstatutreeDB):
                                 #print(sent)
                                 sf.writelines(''.join(' '.join(sent).rstrip()+'\n'))
                                 tf.writelines(tag+'\n')
-
+    @deprecate
     def put_element(self, element):
         assert isinstance(element, Element)
         if element.etype == 'Sentence':
@@ -374,21 +379,22 @@ class TokenizedJstatutreeDB(JstatutreeDB):
     
     def get_subdb(self, target_codes):
         return self.__class__(self.path, self.tokenizer, target_codes)
-    
-    def get_jstatutree(self, code, default=None):
-        code = str(ReikiCode(code))
-        jstree = self.jstatutree_db.get(code, None)
-        for e in jstree.iter('Sentence'):
-            e.text = self.tokenizer.tokenize(e.text)
-        if not jstree:
-            return default
-        #jstree._root = self.get_element(jstree._root, [])
-        return jstree
+
+    # def get_jstatutree(self, code, default=None):
+    #     code = str(ReikiCode(code))
+    #     jstree = self.jstatutree_db.get(code, None)
+    #     for e in jstree.iter('Sentence'):
+    #         e.text = self.tokenizer.tokenize(e.text)
+    #     if not jstree:
+    #         return default
+    #     #jstree._root = self.get_element(jstree._root, [])
+    #     return jstree
     
     def _complete_element(self, elem):
         for e in elem.iter('Sentence'):
             if isinstance(e.text, str):
                 e.text = self.tokenizer.tokenize(e.text)
+                print(e.text)
         return elem
     
     #def iter_elements(self, target_etype, include_tag=True):

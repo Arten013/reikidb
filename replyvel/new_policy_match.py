@@ -1,6 +1,6 @@
 from jstatutree.element import Element
 from jstatutree import Jstatutree, etypes
-from typing import Generator, Mapping, Union, Sequence
+from typing import Generator, Mapping, Union, Sequence, Tuple
 import math
 import numpy as np
 from collections import OrderedDict
@@ -43,8 +43,9 @@ class ParallelScorer(AbstractScorer):
 
     def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
         score_list = []
-        for scorer in self.scorers.values():
-            single_score, single_other_results = scorer.scoring(edge, edge_store, **other_results)
+        edge_store_dict = {k:v for k, v in edge_store.items()}
+        for tag, scorer in self.scorers.items():
+            single_score, single_other_results = scorer.scoring(edge, edge_store_dict[tag], **other_results)
             score_list += [single_score]
             other_results.update(single_other_results)
         return np.array(score_list), other_results
@@ -58,7 +59,7 @@ class PolicyMatchObject(object):
     def add_unit(self, query_tree: Jstatutree, match_tree: Jstatutree, edge_store: EdgeStore):
         self.units[str(match_tree.lawdata.code)] = PolicyMatchUnit(query_tree, match_tree, edge_store)
 
-    def ranking(self, threshold: float, topn: int=3, main_tag: str=None):
+    def ranking(self, threshold: float, topn: int=3, main_tag: str=None) -> Tuple[str, Sequence[Edge]]:
         main_tag_idx = 0 if main_tag is None else [i for i, t in enumerate(self.scorer_tags) if t == main_tag][0]
         results = [(k, list(u.find_matching_edge(threshold))) for k, u in self.units.items()]
         def rerank(stag: str, results: Sequence[Edge], edge_store: EdgeStore):
@@ -69,8 +70,8 @@ class PolicyMatchObject(object):
         return sorted(results, key=lambda x: rerank(*x[1][main_tag_idx]))[:topn]
 
     def comp_table(self, threshold: float, topn: int=3, *args, **kwargs):
-        for u in self.ranking(threshold, topn):
-            yield u.comp_table(threshold, *args, **kwargs)
+        for k, u in self.ranking(threshold, topn):
+            yield self.units[k].comp_table(threshold, *args, **kwargs)
 
 
 class PolicyMatchUnit(object):
@@ -105,17 +106,17 @@ class PolicyMatchUnit(object):
                     results.append(e)
             yield stag, results, edge_store
 
-    def comp_table(self, threshold: float, *, edge_colorset: Mapping = None, sub_branch: bool=True, query_root: str=None, match_root: str=None, **kwargs) -> Digraph:
+    def comp_table(self, threshold: float, *, edge_colorset: Mapping = None, sub_branch: str='ALL', query_root: str=None, match_root: str=None, **kwargs) -> Digraph:
         graph_edge_store = ParallelizedEdgeStore(scorer_tags=list(self.edge_store.keys()))
         edge_colorset = edge_colorset or {}
         for i, (tag, edges, edge_store) in enumerate(self.find_matching_edge(threshold, query_root, match_root)):
             for e in edges:
                 e = self.edge_store.find_edge(e)
                 if e in graph_edge_store:
-                    e.gviz_attrib['label'] = tag+ '・' + e.gviz_attrib['label']
+                    e.gviz_attrib['xlabel'] = tag+ '・' + e.gviz_attrib['label']
                     continue
                 e = graph_edge_store.add_edge(e)
-                e.gviz_attrib['label'] = '{}({})'.format(
+                e.gviz_attrib['xlabel'] = '{}({})'.format(
                     tag,
                     ', '.join(
                         '{0}:{1}'.format(k, round(e.score[j], 3)) for j, k in enumerate(self.edge_store.keys())
@@ -123,15 +124,23 @@ class PolicyMatchUnit(object):
                 )
                 e.gviz_attrib['color'] = edge_colorset.get(tag, DefaultEdgeColorset[i])
                 e.gviz_attrib['style'] = 'solid'
+                e.gviz_attrib['tailport'] = 'e'
+                e.gviz_attrib['headport'] = 'w'
                 if not sub_branch:
                     continue
-                for me in edge_store.iter_edges(qkey=str(e.qnode.code), tkey=str(e.tnode.code)):
+                elif sub_branch == 'maxmatch':
+                    edge_gen = edge_store.leaf_max_match(e)
+                else:
+                    edge_gen = edge_store.iter_edges(qkey=str(e.qnode.code), tkey=str(e.tnode.code))
+                for me in edge_gen:
                     if me in graph_edge_store or not me.is_leaf_pair():
                         continue
                     me = graph_edge_store.add_edge(self.edge_store.find_edge(me))
-                    me.gviz_attrib['label'] = '{0}'.format(round(me.score[0], 3))
+                    me.gviz_attrib['xlabel'] = '{0}'.format(round(me.score[0], 3))
                     # me.gviz_attrib['color'] = edge_colorset.get(tag, DefaultEdgeColorset[i])
                     me.gviz_attrib['style'] = 'dotted'
+                    me.gviz_attrib['tailport'] = 'e'
+                    me.gviz_attrib['headport'] = 'w'
                     me.is_aligner = True
         factory = CompTableGraphFactory()
         return factory.construct(
@@ -145,16 +154,20 @@ class PolicyMatchUnit(object):
             for e in edges:
                 graph_edge_store = EdgeStore()
                 e = graph_edge_store.add_edge(e)
-                e.gviz_attrib['label'] = '{0}:{1}'.format(tag, round(e.score, 3))
+                e.gviz_attrib['xlabel'] = '{0}:{1}'.format(tag, round(e.score, 3))
                 e.gviz_attrib['style'] = 'solid'
+                e.gviz_attrib['tailport'] = 'e'
+                e.gviz_attrib['headport'] = 'w'
                 if not sub_branch:
                     continue
                 for me in edge_store.iter_edges(qkey=str(e.qnode.code), tkey=str(e.tnode.code)):
                     if me in graph_edge_store or not me.is_leaf_pair():
                         continue
                     me = graph_edge_store.add_edge(me)
-                    me.gviz_attrib['label'] = '{0}:{1}'.format('Similarity', round(me.score, 3))
+                    me.gviz_attrib['xlabel'] = '{0}:{1}'.format('Similarity', round(me.score, 3))
                     me.gviz_attrib['style'] = 'dotted'
+                    me.gviz_attrib['tailport'] = 'e'
+                    me.gviz_attrib['headport'] = 'w'
                     me.is_aligner = True
                 factory = CompTableGraphFactory()
                 yield tag, e, factory.construct(
@@ -168,10 +181,20 @@ class CompTableGraphFactory(object):
     def construct(self, query_tree: Jstatutree, match_tree: Jstatutree, edges: EdgeStore) -> Digraph:
         G = Digraph('comptable', filename="hoge")
         G.body.append('\tgraph [ newrank=true compound=true; ];')
+        G.body.append('\tsplines=false;')
+        G.body.append('\trankdir=TB;')
         G.body.append('\tnodesep=2;')
         G.body.append('\tlayout="dot";')
-        G.node('Start', label='Start', style='invis')
-        G.node('End', label='End', style='invis')
+        G.node('QStart', label='QStart', style='invis', weight='100')
+        G.node('QEnd', label='QEnd', style='invis', weight='100')
+        G.node('MStart', label='MStart', style='invis', weight='100')
+        G.node('MEnd', label='MEnd', style='invis', weight='100')
+        G.edge('QStart', 'MStart', style='invis', weight='100')
+        G.body.append('{rank=same; QStart MStart;}')
+        G.edge('QEnd', 'MEnd', style='invis', weight='100')
+        G.body.append('{rank=same; QEnd MEnd;}')
+        G.node('QStart', label='QEnd', style='invis', weight='100')
+        G.node('MStart', label='MEnd', style='invis', weight='100')
 
         colorset = defaultdict(lambda: 'black')
         colorset.update(
@@ -186,11 +209,11 @@ class CompTableGraphFactory(object):
         target_graph = self.get_graph(match_tree.getroot(), match_tree.lawdata.name, colorset)
 
         G.subgraph(query_graph['graph'])
-        G.edge('Start', query_graph['head'].code, style='invis')
-        G.edge(query_graph['tail'].code, 'End', style='invis')
+        G.edge('QStart', query_graph['head'].code, style='invis', weight='1000')
+        G.edge(query_graph['tail'].code, 'QEnd', style='invis', weight='1000')
         G.subgraph(target_graph['graph'])
-        G.edge('Start', target_graph['head'].code, style='invis')
-        G.edge(target_graph['tail'].code, 'End', style='invis')
+        G.edge('MStart', target_graph['head'].code, style='invis', weight='1000')
+        G.edge(target_graph['tail'].code, 'MEnd', style='invis', weight='1000')
 
         for edge in edges.iter_edges(qkey=str(query_tree.lawdata.code), tkey=str(match_tree.lawdata.code)):
             qleaf = self.get_sample_leaf(edge.qnode)
@@ -205,16 +228,19 @@ class CompTableGraphFactory(object):
 
         max_rank = -1
         for ql in query_graph['leaves']:
-            if not edges.from_qcode.has_subtrie(str(ql.code)):
-                continue
+            #print(ql.code)
+            #if not edges.from_qcode.has_subtrie(str(ql.code)):
+            #    continue
             tedges = list(e for e in edges.iter_edges(qkey=ql.code) if e.is_aligner)
+            #print(tedges)
             if len(tedges) == 0:
                 continue
             tcode = tedges[0].tnode.code
             for i, tl in enumerate(target_graph['leaves'][max_rank + 1:]):
                 if tl.code == tcode:
+                    # print('{rank=same;' + '"' + ql.code + '"' + '; ' + '"' + tl.code + '"' + ';}')
                     max_rank = i + max_rank + 1
-                    G.body.append('{rank=same;' + '"' + ql.code + '"' + '; ' + '"' + tl.code + '"' + ';}')
+                    #G.body.append('{rank=same;' + '"' + ql.code + '"' + '; ' + '"' + tl.code + '"' + ';}')
                     break
         return G
 

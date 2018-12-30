@@ -211,3 +211,17 @@ class Scorer(object):
             score = 1 / (1 + max(proximity_list))
             logger.debug('1/(1+%f) = %f', max(proximity_list), score)
             return score, other_results
+
+    class LCA(AbstractScorer):
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            logger = get_logger('Alternately.Scorer.LCA.scoring')
+            for e in edge_store.iter_edges(qkey=edge.qnode.code, tkey=edge.tnode.code):
+                if e.is_leaf_pair() or e.score == 0:
+                    continue
+                print('%s is not an LCA pair (too big)', str(edge))
+                return 0.0, other_results
+            if not edge_store.is_lca_pair_edge(edge):
+                print('%s is not an LCA pair (too small)', str(edge))
+                return 0.0, other_results
+            print('%s is an LCA pair.', str(edge))
+            return 1.0, other_results

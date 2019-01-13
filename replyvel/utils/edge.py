@@ -47,6 +47,17 @@ class Edge(object):
         G.add_edge(self.qnode.code, self.tnode.code, weight=self.score)
         return G
 
+    def __lt__(self, other):
+        return self.qnode.code+self.tnode.code < other.qnode.code+other.tnode.code
+
+    def __eq__(self, other):
+        if isinstance(other, Edge):
+            if self.qnode.code == other.qnode.code and self.tnode.code == other.tnode.code:
+                return True
+        return False
+
+    def __hash__(self):
+        return hash(self.qnode.code+self.tnode.code)
 
 EdgeLikeType = NewType('EdgeLikeType', Union[Edge, Sequence[str], Sequence[Element]])
 
@@ -84,7 +95,7 @@ class ParallelizedEdge(Edge):
     def add_to_nxbipartite(self, G: nx.DiGraph, score_idx: int = 0) -> nx.DiGraph:
         G.add_node(self.qnode.code, bipartite=0)
         G.add_node(self.tnode.code, bipartite=1)
-        G.add_edge(self.qnode.code, self.tnode.code, weight=self.score[score_idx])
+        G.add_edge(self.qnode.code, self.tnode.code)#, weight=self.score[score_idx])
         return G
 
 
@@ -94,6 +105,7 @@ class EdgeStoreCore(object):
         self.from_tcode = trie.StringTrie()
         self._edges = []
         self.edge_count_per_tree = Counter()
+        self.marked_ids = []
 
     @property
     def edges(self):
@@ -129,6 +141,15 @@ class EdgeStoreCore(object):
         self._edges = copy.deepcopy(src._edges)
         return
 
+    def mark_edge(self, item: EdgeLikeType):
+        self.marked_ids.append(self._get_edge_id(item))
+        
+    def delete_marked_edge(self):
+        for i in self.marked_ids:
+            if i is not None:
+                self._delete_edge(i)
+        self.marked_ids = []
+    
     def _delete_edge(self, idx: int):
         self._edges[idx] = None
 
@@ -142,6 +163,21 @@ class EdgeStoreCore(object):
         for i in self._find_valid_edge_indices(qcode, tcode):
             self._delete_edge(i)
 
+    def delete_descendant_edges(self, item: EdgeLikeType, delete_leaves=False):
+        qcode, tcode = edge_like_to_codes(item)
+        qindice_set = set(self._iter_idx_from_code(qcode))
+        tindice_set = set(self._iter_idx_from_code(tcode, False))
+        self_idx = self._get_edge_id(item, None)
+        if delete_leaves:
+            for i in qindice_set & tindice_set:
+                if i != self_idx:
+                    self._delete_edge(i)
+        else:
+            for i in qindice_set & tindice_set:
+                if self._check_edge_idx(i) and i != self_idx and not self._edges[i].is_leaf_pair():
+                    assert self._edges[i] != item
+                    self._delete_edge(i)
+            
     def add(self, qnode: Element, tnode: Element, score: EdgeScoreType, tag: str = None):
         if tag is not None and tag != 'default':
             get_logger('EdgeStore.add').warning('Any tag should not be specified in Non-parallelized EdgeStore.')
@@ -188,7 +224,20 @@ class EdgeStoreCore(object):
                 edge_indices = qedge_indices | tedge_indices
             yield from (self._edges[i] for i in edge_indices if self._check_edge_idx(i))
 
-    def get_edge(self, item: EdgeLikeType, default: X = None) -> Union[Edge, X]:
+    def has_ancestor_pair(self, edge: Edge, include_self:bool = False, key=None):
+        qpref = self.from_qcode.longest_prefix(edge.qnode.code)
+        if qpref.key is None:
+            return False
+        tpref = self.from_tcode.longest_prefix(edge.tnode.code)
+        if tpref.key is None:
+            return False
+        qis = set(i for node in self.from_qcode.walk_towards(qpref.key) for i in self.from_qcode.get(node.key, []) if self._check_edge_idx(i) and (include_self or self._edges[i] != edge) and (key is None or key(self._edges[i])))
+        for node in self.from_tcode.walk_towards(tpref.key):
+            if len(set(self.from_tcode.get(node.key, [])) & qis) > 0:
+                return True
+        return False
+
+    def _get_edge_id(self, item: EdgeLikeType, default: X = None) -> Union[Edge, X]:
         qcode, tcode = edge_like_to_codes(item)
         indices = self._find_valid_edge_indices(qcode, tcode)
         if len(indices) > 1:
@@ -198,7 +247,13 @@ class EdgeStoreCore(object):
                 logger.warning(str(self._edges[idx]))
         elif len(indices) == 0:
             return default
-        return self._edges[indices[0]]
+        return indices[0]
+    
+    def get_edge(self, item: EdgeLikeType, default: X = None) -> Union[Edge, X]:
+        idx = self._get_edge_id(item, None)
+        if idx is None:
+            return default
+        return self._edges[idx]
 
     def __len__(self) -> int:
         return sum([1 for _ in self.iter_edges()])
@@ -254,7 +309,7 @@ class EdgeStore(EdgeStoreCore):
             edge.add_to_nxbipartite(G, score_idx=0)
             edge_counter += 1
         t = time.time()
-        mm = nx.max_weight_matching(G)
+        mm = nx.maximal_matching(G)
         logger.info('MaxWeightMatch with %d edges finished in %f sec', edge_counter, time.time() - t)
         return [self.find_edge((q, t)) if (q, t) in self else self.find_edge((t, q))
                 for q, t in mm]
@@ -315,7 +370,7 @@ class ParallelizedEdgeStore(EdgeStore):
                 scores = score
             else:
                 scores = np.zeros(len(self.scorer_tags))
-                scores[self.tag_indices[tag]] = score
+                scores[self.tag_indices["default"]] = score
             edge = ParallelizedEdge(qnode, tnode, scores)
             self._edges.append(edge)
             if qnode.code in self.from_qcode:

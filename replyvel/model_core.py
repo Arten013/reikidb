@@ -35,7 +35,10 @@ class TaggedVectors(object):
         if self.vector_type == 'numpy_array':
             return np.vstack(vectors)
         elif self.vector_type == 'scipy_sparse_matrix':
-            return sparse.vstack(vectors)
+            try:
+                return sparse.vstack(vectors)
+            except:
+                get_logger('TaggedVectors.vstack').critical('Invalid Shape: %s', str(vectors))
         raise Exception('Invalid vector_type '+str(self.vector_type))
     
     def add(self, vec, tag):
@@ -316,12 +319,16 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
     def keys_to_vectors(self, *keys, **kwargs):
         return_keys = kwargs.get('return_keys', False)
         ukeys = self.keys_to_ukeys(*keys)
-        vectors = self.tagged_vectors.get_array(self.tagged_vectors.vstack(self.vecs.get(k) for k in ukeys))
+        if len(ukeys) == 0:
+            return ([], []) if return_keys else []
+        vectors = self.tagged_vectors.get_array(self.tagged_vectors.vstack([self.vecs.get(k) for k in ukeys]))
         print(vectors.shape)
         return (ukeys, vectors) if return_keys else vectors
         
     def most_similar_by_keys(self, keys, *args, **kwargs):
         ukeys, qvecs = self.keys_to_vectors(*keys, return_keys=True)
+        if len(ukeys) == 0:
+            return []
         ranking = self.most_similar(qvecs, *args, **kwargs)
         return list(zip(ukeys, ranking))
     

@@ -9,6 +9,7 @@ from .utils.npm_abstracts import AbstractScorer, AbstractActivator, AbstractTrav
 from .utils.edge import Edge, EdgeStore, ParallelizedEdge, ParallelizedEdgeStore
 from .utils.logger import get_logger
 from queue import PriorityQueue
+import re
 
 
 class Traverser(AbstractTraverser):
@@ -49,7 +50,414 @@ def hpush(queue, item, priority):
 def hpop(queue):
     return heapq.heappop(queue)[1]
 
+
+
+class AllTraverser(AbstractTraverser):  # todo: make
+    def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
+        self.query = query
+        self.target = target
+        self.threshold = threshold
+        self.edge_queue = hinit(edge_store.iter_edges())
+        self.edge_store = edge_store
+        self.match_lca = self.edge_store.lca_pair_codes()
+
+    def traverse(self) -> Generator:
+        logger = get_logger('Alternately.Traverser.traverse')
+        i = 0
+        while len(self.edge_queue) > 0:
+            priority, edge = heapq.heappop(self.edge_queue)
+            #if "06/062014/0483" in edge.tnode.code:
+            #print("prio:", priority, str(edge))
+            if edge.is_leaf_pair():
+                parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
+                parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
+                #print('before: ', edge)
+                edge = Edge(parent_qnode, parent_tnode)
+                if edge.is_leaf_pair():
+                    item = yield False  # todo: implement halt(score, edges)
+                else:
+                    item = yield edge
+                    if item is None:
+                        continue
+                #print('after: ', edge)
+            elif edge in self.edge_store:# or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
+                # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
+                continue
+            #print("prio:", priority, str(edge))
+            else:
+                #if "06/062014/0483" in edge.tnode.code:
+                #print("yield:", priority, str(edge))
+                item = yield edge
+                if item is None:
+                    continue
+            score, scorer, edge_store, missing_link = item
+            check = False
+            parent_qnode = self.get_query_parent(edge.qnode)
+            parent_tnode = self.get_target_parent(edge.tnode)
+            raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
+            raised_parent_tnode = self.rise_target_parent(self.get_target_parent(edge.tnode))
+            if raised_parent_qnode is not None:
+                parent_qnode = raised_parent_qnode
+            if raised_parent_tnode is not None:
+                parent_tnode = raised_parent_tnode
+            future_edges = []
+            if parent_qnode:
+                future_edges.append(Edge(parent_qnode, edge.tnode))
+            if parent_tnode:
+                future_edges.append(Edge(edge.qnode, parent_tnode))
+            for e in future_edges:
+                upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                hpush(self.edge_queue, e, i)
+                i += 1
+        yield None
+
+
+class EdgeQueue(object):
+    def __init__(self):
+        self.items = [None]*1000000
+        self.head = 0
+        self.tail = 0
+
+    def is_empty(self):
+        return self.head == self.tail
+
+    def get(self) -> Edge:
+        if self.is_empty():
+            raise Exception('Queue is empty.')
+        ret: Edge = self.items[self.tail]
+        self.tail += 1
+        return ret
+
+    def put(self, item: Edge):
+        self.items[self.head] = item
+        self.head += 1
+
+class LCAPriorityTraverser(AbstractTraverser):  # todo: make
+    def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
+        self.query = query
+        self.target = target
+        self.threshold = threshold
+        self.edge_queue = EdgeQueue()#hinit(edge_store.iter_edges())
+        self.edge_store = edge_store
+        self.match_lca = self.edge_store.lca_pair_codes()
+        if len(self.match_lca[0]) == 21 and len(self.match_lca[1]) == 21:
+            self.match_lca = None
+        for e in edge_store.iter_edges():
+            self.edge_queue.put(e)
+
+    def traverse(self) -> Generator:
+        logger = get_logger('Alternately.Traverser.traverse')
+        while not self.edge_queue.is_empty():
+            edge = self.edge_queue.get()
+            if edge.is_leaf_pair():
+                parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
+                parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
+                edge = Edge(parent_qnode, parent_tnode)
+                if edge.is_leaf_pair():
+                    item = yield False  # todo: implement halt(score, edges)
+                else:
+                    item = yield edge
+                    if item is None:
+                        continue
+            elif edge in self.edge_store:
+                continue
+            elif self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
+                item = yield False
+            else:
+                item = yield edge
+                if item is None:
+                    continue
+            score, scorer, edge_store, _ = item
+            usable_th = self.match_lca is not None and edge.qnode.code in self.match_lca[0] and edge.tnode.code in self.match_lca[1]
+            if usable_th and score < self.threshold:
+                if '06/062014/01050' in str(edge):
+                    print('lca skip')
+                    print(edge)
+                #check = True
+                continue
+                pass
+            parent_qnode = self.get_query_parent(edge.qnode)
+            parent_tnode = self.get_target_parent(edge.tnode)
+            raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
+            raised_parent_tnode = self.rise_target_parent(self.get_target_parent(edge.tnode))
+            if raised_parent_qnode is not None:
+                parent_qnode = raised_parent_qnode
+            if raised_parent_tnode is not None:
+                parent_tnode = raised_parent_tnode
+            future_edges = []
+            if parent_qnode:
+                future_edges.append(Edge(parent_qnode, edge.tnode))
+            if parent_tnode:
+                future_edges.append(Edge(edge.qnode, parent_tnode))
+            #if parent_qnode and parent_tnode:
+            #    future_edges.append(Edge(parent_qnode, parent_tnode))
+            # halt_flag = True
+            #print(missing_link, edge)
+            if not usable_th:
+                #if True:
+                for e in future_edges:
+                    upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                    #hpush(self.edge_queue, e, -lower_limit)
+                    # hpush(self.edge_queue, e, -e.qnode.CATEGORY-e.tnode.CATEGORY)
+                    self.edge_queue.put(e)
+                    if '06/062014/01050' in str(edge):
+                        print('future edge')
+                        print(e)
+            else:
+                for e in future_edges:
+                    upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                    #assert lower_limit <= scorer.scoring(e, edge_store)[0] <= upper_limit, '{0:03}, {1:03}, {2:03}'.format(lower_limit, scorer.scoring(e, edge_store)[0], upper_limit)
+                    if upper_limit >= self.threshold:
+                        #if "06/062014/0483" in e.tnode.code:
+                        #print("rise:", e)
+                        #hpush(self.edge_queue, e, -lower_limit)
+                        self.edge_queue.put(e)
+                        # if check and scorer.scoring(e, edge_store)[0] >= self.threshold:
+                        #     print('pruning error:')
+                        #     e.score = scorer.scoring(e, edge_store)[0]
+                        #     print(edge)
+                        #     print(e)
+                        #     raise Exception()
+                        halt_flag = False
+                # if halt_flag and len(future_edges) > 0:
+                #     print("HALT:", str(edge))
+                #     pass
+        yield None
 class PriorityTraverser(AbstractTraverser):  # todo: make
+    def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
+        self.query = query
+        self.target = target
+        self.threshold = threshold
+        self.edge_queue = hinit(edge_store.iter_edges())
+        self.edge_store = edge_store
+
+    def traverse(self) -> Generator:
+        logger = get_logger('Alternately.Traverser.traverse')
+        while len(self.edge_queue) > 0:
+            priority, edge = heapq.heappop(self.edge_queue)
+            #if "06/062014/0483" in edge.tnode.code:
+            #print("prio:", priority, str(edge))
+            if edge.is_leaf_pair():
+                parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
+                parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
+                #print('before: ', edge)
+                edge = Edge(parent_qnode, parent_tnode)
+                if edge.is_leaf_pair():
+                    item = yield False  # todo: implement halt(score, edges)
+                else:
+                    item = yield edge
+                    if item is None:
+                        continue
+                #print('after: ', edge)
+            elif edge in self.edge_store or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
+                # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
+                continue
+            #print("prio:", priority, str(edge))
+            else:
+                #if "06/062014/0483" in edge.tnode.code:
+                #print("yield:", priority, str(edge))
+                item = yield edge
+                if item is None:
+                    continue
+            score, scorer, edge_store, missing_link = item
+            check = False
+            if missing_link == 0 and score < self.threshold:
+                #check = True
+                continue
+            parent_qnode = self.get_query_parent(edge.qnode)
+            parent_tnode = self.get_target_parent(edge.tnode)
+            raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
+            raised_parent_tnode = self.rise_target_parent(self.get_target_parent(edge.tnode))
+            if raised_parent_qnode is not None:
+                parent_qnode = raised_parent_qnode
+            if raised_parent_tnode is not None:
+                parent_tnode = raised_parent_tnode
+            future_edges = []
+            if parent_qnode:
+                future_edges.append(Edge(parent_qnode, edge.tnode))
+            if parent_tnode:
+                future_edges.append(Edge(edge.qnode, parent_tnode))
+            if parent_qnode and parent_tnode:
+                future_edges.append(Edge(parent_qnode, parent_tnode))
+            # halt_flag = True
+            #print(missing_link, edge)
+            if missing_link > 0:
+                #if True:
+                for e in future_edges:
+                    upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                    hpush(self.edge_queue, e, -lower_limit)
+
+            else:
+                for e in future_edges:
+                    upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                    assert lower_limit <= scorer.scoring(e, edge_store)[0] <= upper_limit, '{0:03}, {1:03}, {2:03}'.format(lower_limit, scorer.scoring(e, edge_store)[0], upper_limit)
+                    if upper_limit >= self.threshold:
+                        #if "06/062014/0483" in e.tnode.code:
+                        #print("rise:", e)
+                        hpush(self.edge_queue, e, -lower_limit)
+                        # if check and scorer.scoring(e, edge_store)[0] >= self.threshold:
+                        #     print('pruning error:')
+                        #     e.score = scorer.scoring(e, edge_store)[0]
+                        #     print(edge)
+                        #     print(e)
+                        #     raise Exception()
+                        halt_flag = False
+                # if halt_flag and len(future_edges) > 0:
+                #     print("HALT:", str(edge))
+                #     pass
+        yield None
+
+class DFSPriorityTraverser(AbstractTraverser):  # todo: make
+    def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
+        self.query = query
+        self.target = target
+        self.threshold = threshold
+        self.edge_queue = hinit(edge_store.iter_edges())
+        self.edge_store = edge_store
+
+    def traverse(self) -> Generator:
+        logger = get_logger('Alternately.Traverser.traverse')
+        while len(self.edge_queue) > 0:
+            priority, edge = heapq.heappop(self.edge_queue)
+            #if "06/062014/0483" in edge.tnode.code:
+                #print("prio:", priority, str(edge))
+            if edge.is_leaf_pair():
+                parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
+                parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
+                #print('before: ', edge)
+                edge = Edge(parent_qnode, parent_tnode)
+                if edge.is_leaf_pair():
+                    item = yield False  # todo: implement halt(score, edges)
+                else:
+                    item = yield edge
+                    if item is None:
+                        continue
+                #print('after: ', edge)
+            elif edge in self.edge_store or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
+                # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
+                continue
+            #print("prio:", priority, str(edge))
+            else:
+                #if "06/062014/0483" in edge.tnode.code:
+                    #print("yield:", priority, str(edge))
+                item = yield edge
+                if item is None:
+                    continue
+            score, scorer, edge_store, missing_link = item
+            check = False
+            if missing_link == 0 and score < self.threshold:
+                #check = True
+                continue
+            parent_qnode = self.get_query_parent(edge.qnode)
+            parent_tnode = self.get_target_parent(edge.tnode)
+            raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
+            raised_parent_tnode = self.rise_target_parent(self.get_target_parent(edge.tnode))
+            if raised_parent_qnode is not None:
+                parent_qnode = raised_parent_qnode
+            if raised_parent_tnode is not None:
+                parent_tnode = raised_parent_tnode
+            future_edges = []
+            if parent_qnode:
+                future_edges.append(Edge(parent_qnode, edge.tnode))
+            if parent_tnode:
+                future_edges.append(Edge(edge.qnode, parent_tnode))
+            if parent_qnode and parent_tnode:
+                future_edges.append(Edge(parent_qnode, parent_tnode))
+            for e in future_edges:
+                upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                assert lower_limit <= scorer.scoring(e, edge_store)[0] <= upper_limit, '{0:03}, {1:03}, {2:03}'.format(lower_limit, scorer.scoring(e, edge_store)[0], upper_limit)
+                if upper_limit >= self.threshold:
+                    #if "06/062014/0483" in e.tnode.code:
+                        #print("rise:", e)
+                    hpush(self.edge_queue, e, e.qnode.CATEGORY+e.tnode.CATEGORY)
+                    # if check and scorer.scoring(e, edge_store)[0] >= self.threshold:
+                    #     print('pruning error:')
+                    #     e.score = scorer.scoring(e, edge_store)[0]
+                    #     print(edge)
+                    #     print(e)
+                    #     raise Exception()
+                    halt_flag = False
+            # if halt_flag and len(future_edges) > 0:
+            #     print("HALT:", str(edge))
+            #     pass
+        yield None
+class BFSPriorityTraverser(AbstractTraverser):  # todo: make
+    def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
+        self.query = query
+        self.target = target
+        self.threshold = threshold
+        self.edge_queue = hinit(edge_store.iter_edges())
+        self.edge_store = edge_store
+
+    def traverse(self) -> Generator:
+        logger = get_logger('Alternately.Traverser.traverse')
+        while len(self.edge_queue) > 0:
+            priority, edge = heapq.heappop(self.edge_queue)
+            #if "06/062014/0483" in edge.tnode.code:
+                #print("prio:", priority, str(edge))
+            if edge.is_leaf_pair():
+                parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
+                parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
+                #print('before: ', edge)
+                edge = Edge(parent_qnode, parent_tnode)
+                if edge.is_leaf_pair():
+                    item = yield False  # todo: implement halt(score, edges)
+                else:
+                    item = yield edge
+                    if item is None:
+                        continue
+                #print('after: ', edge)
+            elif edge in self.edge_store or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
+                # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
+                continue
+            #print("prio:", priority, str(edge))
+            else:
+                #if "06/062014/0483" in edge.tnode.code:
+                    #print("yield:", priority, str(edge))
+                item = yield edge
+                if item is None:
+                    continue
+            score, scorer, edge_store, missing_link = item
+            check = False
+            if missing_link == 0 and score < self.threshold:
+                #check = True
+                continue
+            parent_qnode = self.get_query_parent(edge.qnode)
+            parent_tnode = self.get_target_parent(edge.tnode)
+            raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
+            raised_parent_tnode = self.rise_target_parent(self.get_target_parent(edge.tnode))
+            if raised_parent_qnode is not None:
+                parent_qnode = raised_parent_qnode
+            if raised_parent_tnode is not None:
+                parent_tnode = raised_parent_tnode
+            future_edges = []
+            if parent_qnode:
+                future_edges.append(Edge(parent_qnode, edge.tnode))
+            if parent_tnode:
+                future_edges.append(Edge(edge.qnode, parent_tnode))
+            if parent_qnode and parent_tnode:
+                future_edges.append(Edge(parent_qnode, parent_tnode))
+            for e in future_edges:
+                upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                assert lower_limit <= scorer.scoring(e, edge_store)[0] <= upper_limit, '{0:03}, {1:03}, {2:03}'.format(lower_limit, scorer.scoring(e, edge_store)[0], upper_limit)
+                if upper_limit >= self.threshold:
+                    #if "06/062014/0483" in e.tnode.code:
+                        #print("rise:", e)
+                    hpush(self.edge_queue, e, -e.qnode.CATEGORY-e.tnode.CATEGORY)
+                    # if check and scorer.scoring(e, edge_store)[0] >= self.threshold:
+                    #     print('pruning error:')
+                    #     e.score = scorer.scoring(e, edge_store)[0]
+                    #     print(edge)
+                    #     print(e)
+                    #     raise Exception()
+                    halt_flag = False
+            # if halt_flag and len(future_edges) > 0:
+            #     print("HALT:", str(edge))
+            #     pass
+        yield None
+
+from random import random
+class RandPriorityTraverser(AbstractTraverser):  # todo: make
     def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):
         self.query = query
         self.target = target
@@ -75,7 +483,7 @@ class PriorityTraverser(AbstractTraverser):  # todo: make
                     if item is None:
                         continue
                 #print('after: ', edge)
-            elif self.edge_store.has_ancestor_pair(edge, include_self=True):
+            elif edge in self.edge_store or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
                 # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
                 continue
             #print("prio:", priority, str(edge))
@@ -85,6 +493,11 @@ class PriorityTraverser(AbstractTraverser):  # todo: make
                 item = yield edge
                 if item is None:
                     continue
+            score, scorer, edge_store, missing_link = item
+            check = False
+            if missing_link == 0 and score < self.threshold:
+                #check = True
+                continue
             parent_qnode = self.get_query_parent(edge.qnode)
             parent_tnode = self.get_target_parent(edge.tnode)
             raised_parent_qnode = self.rise_query_parent(self.get_query_parent(edge.qnode))
@@ -93,7 +506,6 @@ class PriorityTraverser(AbstractTraverser):  # todo: make
                 parent_qnode = raised_parent_qnode
             if raised_parent_tnode is not None:
                 parent_tnode = raised_parent_tnode
-            scorer, edge_store = item
             future_edges = []
             if parent_qnode:
                 future_edges.append(Edge(parent_qnode, edge.tnode))
@@ -101,25 +513,108 @@ class PriorityTraverser(AbstractTraverser):  # todo: make
                 future_edges.append(Edge(edge.qnode, parent_tnode))
             if parent_qnode and parent_tnode:
                 future_edges.append(Edge(parent_qnode, parent_tnode))
-            halt_flag = True
             for e in future_edges:
                 upper_limit, lower_limit = scorer.score_range(e, edge_store)
+                assert lower_limit <= scorer.scoring(e, edge_store)[0] <= upper_limit, '{0:03}, {1:03}, {2:03}'.format(lower_limit, scorer.scoring(e, edge_store)[0], upper_limit)
                 if upper_limit >= self.threshold:
                     #if "06/062014/0483" in e.tnode.code:
                         #print("rise:", e)
-                    hpush(self.edge_queue, e, -lower_limit)
+                    hpush(self.edge_queue, e, random())
+                    # if check and scorer.scoring(e, edge_store)[0] >= self.threshold:
+                    #     print('pruning error:')
+                    #     e.score = scorer.scoring(e, edge_store)[0]
+                    #     print(edge)
+                    #     print(e)
+                    #     raise Exception()
                     halt_flag = False
-            if halt_flag and len(future_edges) > 0:
-                #print("HALT:", str(edge))
-                pass
+            # if halt_flag and len(future_edges) > 0:
+            #     print("HALT:", str(edge))
+            #     pass
         yield None
 
 
 class Scorer(object):
+    class DistributionObserver(AbstractScorer):
+        def __init__(self, scorer):
+            super().__init__()
+            self.scorer = scorer
+        def reset_tmp_cache(self):
+            self.scorer.reset_tmp_cache()
+
+        def reset_cache(self):
+            self.scorer.reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            return self.scorer.scoring(edge, edge_store, **other_results)
+
+        def score_range(self, edge: Edge, edge_store: EdgeStore):
+            u, l = self.scorer.score_range(edge, edge_store)
+            print(u, l, self.scorer.scoring(edge, edge_store)[0])
+            return u, l
+    class NoBranchCut(AbstractScorer):
+        def __init__(self, scorer):
+            super().__init__()
+            self.scorer = scorer
+        def reset_tmp_cache(self):
+            self.scorer.reset_tmp_cache()
+
+        def reset_cache(self):
+            self.scorer.reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            return self.scorer.scoring(edge, edge_store, **other_results)
+
+        def score_range(self, edge: Edge, edge_store: EdgeStore):
+            u, _ = self.scorer.score_range(edge, edge_store)
+            return 1.0, 0.0
+
+    class NoPriority(AbstractScorer):
+        def __init__(self, scorer):
+            super().__init__()
+            self.scorer = scorer
+        def reset_tmp_cache(self):
+            self.scorer.reset_tmp_cache()
+
+        def reset_cache(self):
+            self.scorer.reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            return self.scorer.scoring(edge, edge_store, **other_results)
+
+        def score_range(self, edge: Edge, edge_store: EdgeStore):
+            u, _ = self.scorer.score_range(edge, edge_store)
+            return u, 0.0
+
+    class NoPreRead(AbstractScorer):
+        def __init__(self, scorer):
+            super().__init__()
+            self.scorer = scorer
+
+        def reset_tmp_cache(self):
+            self.scorer.reset_tmp_cache()
+
+        def reset_cache(self):
+            self.scorer.reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            return self.scorer.scoring(edge, edge_store, **other_results)
+
+        def score_range(self, edge: Edge, edge_store: EdgeStore):
+            _, l = self.scorer.score_range(edge, edge_store)
+            return 1.0, l
+
     class LinearCombination(AbstractScorer):
         def __init__(self, weighted_scorers: list):
             super().__init__()
             self.scorers = weighted_scorers
+
+        def reset_tmp_cache(self):
+            for s, _ in self.scorers:
+                s.reset_tmp_cache()
+
+        def reset_cache(self):
+            for s, _ in self.scorers:
+                s.reset_cache()
 
         def add(self, scorer, weight):
             self.scorers.append((scorer, weight))
@@ -152,6 +647,14 @@ class Scorer(object):
             super().__init__()
             self.scorers = scorers
 
+        def reset_tmp_cache(self):
+            for s in self.scorers:
+                s.reset_tmp_cache()
+
+        def reset_cache(self):
+            for s in self.scorers:
+                s.reset_cache()
+
         def add(self, scorer):
             self.scorers.append(scorer)
 
@@ -164,6 +667,7 @@ class Scorer(object):
             return math.pow(score, 1.0 / len(self.scorers)), other_results
 
         def score_range(self, edge: Edge, edge_store: EdgeStore):
+            #print(edge)
             uscore = 1.0
             lscore = 1.0
             for scorer in self.scorers:
@@ -186,7 +690,13 @@ class Scorer(object):
         def __init__(self, maxmatch: bool = False):
             super().__init__()
             self.maxmatch = maxmatch
-            self._cache.update({'score': {}, 'nume': {}})
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
 
         def scoring(self, edge: Edge, edge_store: EdgeStore, **_calc_cache):
             logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
@@ -200,24 +710,33 @@ class Scorer(object):
             qleaf_num = self.calc_qleaf_count(edge)
             score = match_num / qleaf_num
             logger.debug('%f/%f = %f', match_num, qleaf_num, score)
-            self._cache['nume'][edge] = match_num
+            self.caching('nume', edge, len(matching))
             return score, _calc_cache
 
         def score_range(self, edge: Edge, edge_store: EdgeStore):
-            qcodes = []
-            for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode):
-                if not e.is_leaf_pair():
-                    continue
-                qcodes.append(e.qnode.code)
-            num = len(set(qcodes))
-            deno = self.calc_qleaf_count(edge)
-            return num/deno, max([self._cache['nume'].get(c, 1) for c in edge.qnode])/deno
+            leaf_num = self.calc_qleaf_count(edge)
+            if self.maxmatch:
+                used_leaf_num = len(set(
+                    [e.qnode.code for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode) if e.is_leaf_pair()]
+                ))
+                return used_leaf_num/leaf_num, max([self._cache['nume'].get(c, 1) for c in edge.tnode])/leaf_num
+            else:
+                match_leaf_num = self.get_match_qleaf_num(edge, edge_store)
+                upper_limit = min(match_leaf_num/leaf_num, 1)
+                lower_limit = max([self.get_from_cache('nume',c, 1) for c in edge.qnode])/leaf_num
+                return upper_limit, lower_limit
 
     class TargetLeafCoverage(AbstractScorer):
         def __init__(self, maxmatch: bool = False):
             super().__init__()
             self.maxmatch = maxmatch
-            self._cache.update({'score': {}, 'nume': {}})
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
 
         def scoring(self, edge: Edge, edge_store: EdgeStore, **_calc_cache):
             logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
@@ -231,25 +750,33 @@ class Scorer(object):
             tleaf_num = self.calc_tleaf_count(edge)
             score = match_num / tleaf_num
             logger.debug('%f/%f = %f', match_num, tleaf_num, score)
-            self._cache['nume'][edge] = match_num
+            self.caching('nume', edge, len(matching))
             return score, _calc_cache
 
         def score_range(self, edge: Edge, edge_store: EdgeStore):
-            tcodes = []
-            for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode):
-                if not e.is_leaf_pair():
-                    continue
-                tcodes.append(e.tnode.code)
-            num = len(set(tcodes))
-            deno = self.calc_tleaf_count(edge)
-            return num/deno, max([self._cache['nume'].get(c, 1) for c in edge.tnode])/deno
-
+            leaf_num = self.calc_tleaf_count(edge)
+            if self.maxmatch:
+                used_leaf_num = len(set(
+                    [e.tnode.code for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode) if e.is_leaf_pair()]
+                ))
+                return used_leaf_num/leaf_num, max([self._cache['nume'].get(c, 1) for c in edge.tnode])/leaf_num
+            else:
+                match_leaf_num = self.get_match_tleaf_num(edge, edge_store)
+                upper_limit = min(match_leaf_num/leaf_num, 1)
+                lower_limit = max([self.get_from_cache('nume',c, 1) for c in edge.tnode])/leaf_num
+                return upper_limit, lower_limit
 
     class QueryLeafProximity(AbstractScorer):
         def __init__(self, maxmatch: bool = False):
             super().__init__()
             self.maxmatch = maxmatch
-            self._cache.update({'score': {}, 'nume': {}})
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
 
         def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
             logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
@@ -271,26 +798,30 @@ class Scorer(object):
             proximity_list.append(current_proximity)
             score = 1 / (1 + max(proximity_list))
             logger.debug('1/(1+%f) = %f', max(proximity_list), score)
-            self._cache['nume'][edge] = len(matching)
+            self.caching('nume', edge, len(matching))
             return score, other_results
 
         def score_range(self, edge: Edge, edge_store: EdgeStore):
-            qcodes = []
-            for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode):
-                if not e.is_leaf_pair():
-                    continue
-                qcodes.append(e.qnode.code)
-            num = len(set(qcodes))
-            deno = self.calc_qleaf_count(edge)
-            max_prox = deno - max([self._cache['nume'].get(c, 1) for c in edge.qnode])
-            min_prox = (deno - num)//(num+1)+1 if deno > num else 0.0
+            if edge.qnode.CATEGORY == etypes.CATEGORY_TEXT:
+                return 1, 1
+            leaf_num = self.calc_qleaf_count(edge)
+            match_leaf_num = self.get_match_qleaf_num(edge, edge_store)
+            max_prox = leaf_num - max([self.get_from_cache('nume',c, 1) for c in edge.qnode])
+            min_prox = (leaf_num - match_leaf_num)//(match_leaf_num+1)+1 if leaf_num > match_leaf_num else 0
+            # print('Q:', max_prox, min_prox)
             return 1/(1+min_prox), 1/(1+max_prox)
 
     class TargetLeafProximity(AbstractScorer):
         def __init__(self, maxmatch: bool = False):
             super().__init__()
             self.maxmatch = maxmatch
-            self._cache.update({'score': {}, 'nume': {}})
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
 
         def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
             logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
@@ -312,20 +843,37 @@ class Scorer(object):
             proximity_list.append(current_proximity)
             score = 1 / (1 + max(proximity_list))
             logger.debug('1/(1+%f) = %f', max(proximity_list), score)
-            self._cache['nume'][edge] = len(matching)
+            self.caching('nume', edge, len(matching))
             return score, other_results
 
         def score_range(self, edge: Edge, edge_store: EdgeStore):
-            tcodes = []
-            for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode):
-                if not e.is_leaf_pair():
-                    continue
-                tcodes.append(e.tnode.code)
-            num = len(set(tcodes))
-            deno = self.calc_tleaf_count(edge)
-            max_prox = deno - max([self._cache['nume'].get(c, 1) for c in edge.tnode])
-            min_prox = (deno - num)//(num+1)+1 if deno > num else 0.0
+            if edge.tnode.CATEGORY == etypes.CATEGORY_TEXT:
+                return 1, 1
+            #used_leaf_num = len(set(
+            #    [e.tnode.code for e in edge_store.iter_edges(qkey=edge.qnode, tkey=edge.tnode) if e.is_leaf_pair()]
+            #))
+            leaf_num = self.calc_tleaf_count(edge)
+            match_leaf_num = self.get_match_tleaf_num(edge, edge_store)
+            max_prox = leaf_num - max([self.get_from_cache('nume',c, 1) for c in edge.tnode])
+            min_prox = (leaf_num - match_leaf_num)//(match_leaf_num+1)+1 if leaf_num > match_leaf_num else 0
+            # print('T:', max_prox, min_prox)
             return 1/(1+min_prox), 1/(1+max_prox)
+
+    class Balancer(AbstractScorer):
+        def __init__(self):
+            super().__init__()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            tleaf_count = self.calc_tleaf_count(edge)
+            qleaf_count = self.calc_qleaf_count(edge)
+            if tleaf_count < qleaf_count:
+                return tleaf_count/qleaf_count, other_results
+            else:
+                return qleaf_count/tleaf_count, other_results
+
+        def score_range(self, edge: Edge, edge_store: EdgeStore):
+            s = self.scoring(edge, edge_store)[0]
+            return s, s
 
     class LCA(AbstractScorer):
         def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):

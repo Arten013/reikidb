@@ -50,7 +50,8 @@ class AbstractTraverser(abc.ABC):
 
 class AbstractScorer(abc.ABC):  # todo: from other_result to calc_cache
     def __init__(self):
-        self._cache = {"leaf_count": {}}
+        self._tmp_cache = {}
+        self._cache = {}
 
     @abc.abstractmethod
     def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
@@ -63,6 +64,23 @@ class AbstractScorer(abc.ABC):  # todo: from other_result to calc_cache
     @property
     def is_parallel(self):
         return False
+
+    def get_from_cache(self, category, key, default=None):
+        if category in self._cache:
+            return self._cache[category].get(key, default)
+        return self._tmp_cache[category].get(key, default)
+
+    def caching(self, category, key, item):
+        if category in self._cache:
+            self._cache[category][key] = item
+            return
+        self._tmp_cache[category][key] = item
+
+    def reset_tmp_cache(self):
+        self._tmp_cache = {'match_leaf_num':{}}
+
+    def reset_cache(self):
+        self._cache = {"leaf_count": {}}
 
     def reformatting_leaf_edges(self, *edges: Edge) -> Sequence[Edge]:
         return edges
@@ -77,19 +95,36 @@ class AbstractScorer(abc.ABC):  # todo: from other_result to calc_cache
         return 0.0
 
     def calc_tleaf_count(self, edge):
-        leaf_count = self._cache['leaf_count'].get(edge.tnode.code, None)
+        leaf_count = self.get_from_cache('leaf_count', edge.tnode.code, None)
         if leaf_count is None:
             leaf_count = sum(1 for _ in edge.tnode.iterXsentence(include_code=False, include_value=False))
-            self._cache['leaf_count'][edge.tnode.code] = leaf_count
+            self.caching('leaf_count', edge.tnode.code, leaf_count)
         return leaf_count
 
     def calc_qleaf_count(self, edge):
-        leaf_count = self._cache['leaf_count'].get(edge.qnode.code, None)
+        leaf_count = self.get_from_cache('leaf_count', edge.qnode.code, None)
         if leaf_count is None:
             leaf_count = sum(1 for _ in edge.qnode.iterXsentence(include_code=False, include_value=False))
-            self._cache['leaf_count'][edge.qnode.code] = leaf_count
+            self.caching('leaf_count', edge.qnode.code, leaf_count)
         return leaf_count
 
+    def get_match_tleaf_num(self, edge: Edge, edge_store: EdgeStore):
+        match_leaf_num = self.get_from_cache('match_leaf_num', edge.tnode.code[14:])
+        if match_leaf_num is None:
+            match_leaf_num = len(
+                set(e.tnode.code for e in edge_store.iter_edges() if e.is_leaf_pair())
+            )
+            self.caching('match_leaf_num', edge.tnode.code[14:], match_leaf_num)
+        return match_leaf_num
+
+    def get_match_qleaf_num(self, edge: Edge, edge_store: EdgeStore):
+        match_leaf_num = self.get_from_cache('match_leaf_num', edge.qnode.code[14:])
+        if match_leaf_num is None:
+            match_leaf_num = len(
+                set(e.qnode.code for e in edge_store.iter_edges() if e.is_leaf_pair())
+            )
+            self.caching('match_leaf_num', edge.qnode.code[14:], match_leaf_num)
+        return match_leaf_num
 class AbstractActivator(abc.ABC):
     def __init__(self):
         self.is_parallel = False

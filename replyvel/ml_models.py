@@ -302,7 +302,7 @@ class SimString(JstatutreeModelCore):
         else:
             self.simstring = None
 
-    def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5):
+    def build_match_factory(self, query_key, theta, match_factory_cls):
         logger = get_logger(self.__class__.__name__+'.build_match_factory')
         query = self.db.get_jstatutree(query_key).change_root(query_key)
         if self.rspace_reversed_dict is None:
@@ -320,7 +320,7 @@ class SimString(JstatutreeModelCore):
         entire_leaves_count = 0
         for i, (qkey, qsent) in enumerate(usents.items()):
             qnode = self.rspace_db.get_element(qkey)
-            print(qnode.code)
+            #print(qnode.code)
             sims = np.array([(not match_factory.add_leaf_by_nodes(qnode, skey, 1.0))
                              for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
                              for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if str(skey) not in str(query.lawdata.code)
@@ -448,8 +448,13 @@ class SimString(JstatutreeModelCore):
                 else:
                     val.extend(code)
                 self.rspace_reversed_dict[sentence_hash] = val
-    
+
+    def is_fitted(self):
+        return self.simstring_path.exists()
+
     def fit(self, task_size=None):
+        if self.is_fitted():
+            return
         print('Training begin')
 
         target_mcodes = sorted(self.db.mcodes, key=lambda x: int(x))

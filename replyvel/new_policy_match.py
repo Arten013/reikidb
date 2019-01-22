@@ -362,6 +362,7 @@ class PolicyMatchFactory(object):
             target = target_tree.getroot()
             edges = list(self.leaf_edge_store.iter_edges(tkey=target.code))
             # reformatted_edges = scorer.reformatting_leaf_edges(*edges)
+            # print(edges)
             matching_edge_store = activator.initial_edges(edges)
             logger.debug('initial edge store size: %d', len(matching_edge_store))
             traverser = traverser_cls(self.query_tree.getroot(), target, matching_edge_store, threshold).traverse()

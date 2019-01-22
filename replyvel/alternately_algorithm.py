@@ -604,7 +604,7 @@ class Scorer(object):
             return 1.0, l
 
     class LinearCombination(AbstractScorer):
-        def __init__(self, weighted_scorers: list):
+        def __init__(self, weighted_scorers: list=[]):
             super().__init__()
             self.scorers = weighted_scorers
 
@@ -613,6 +613,7 @@ class Scorer(object):
                 s.reset_tmp_cache()
 
         def reset_cache(self):
+            #print(self.scorers)
             for s, _ in self.scorers:
                 s.reset_cache()
 
@@ -643,7 +644,7 @@ class Scorer(object):
             return uscore, lscore
 
     class GeometricMean(AbstractScorer):
-        def __init__(self, scorers):
+        def __init__(self, scorers=[]):
             super().__init__()
             self.scorers = scorers
 

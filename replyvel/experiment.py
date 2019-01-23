@@ -644,19 +644,24 @@ class Experiment(object):
         tar_path = self.get_structure(grid_num).get_path('annotation')
         shutil.copytree(str("/home/jovyan/develop/annotation"), str(tar_path))
         annotated_codes = list(ReikiAnnotation("/home/jovyan/develop/annotation").annotations.keys())
+        leaf_match_cache = {}
         while self.setting.next_vars():
             match_factory = leaf_match_model.build_match_factory(
                 query_key=self.setting.retrieve('/testset/query'),
                 theta=self.setting.retrieve('/leaf_matching/theta_s'),
                 match_factory_cls=pm.PolicyMatchFactory,
             )
-            match = match_factory.matching(
-                scorer=self.scorer_builder.build(),
-                traverser_cls=self.traverser_cls,
-                activator=self.activator(),
-                threshold=self.setting.retrieve('/retrieve/model/theta_v'),
-                target_codes=annotated_codes
-            )
+            finger_print = self.setting._current_var["theta_v"]
+            match = leaf_match_cache.get(finger_print, None)
+            if match is None:
+                match = match_factory.matching(
+                    scorer=self.scorer_builder.build(),
+                    traverser_cls=self.traverser_cls,
+                    activator=self.activator(),
+                    threshold=self.setting.retrieve('/retrieve/model/theta_v'),
+                    target_codes=annotated_codes
+                )
+                leaf_match_cache[finger_print] = match
             analyzer = MatchAnalyzer(match, structure=self.get_structure(grid_num))
             df = analyzer.evaluate()
             self.setting.reconstruct_df(df, grid_num)
@@ -673,7 +678,3 @@ class Experiment(object):
             mapping=self.DEFAULT_STRUCTURE,
             timestamp=self.timestamp,
             grid_id='grid-{0:04}'.format(i))
-
-    def get_matching_args(self, vars: Dict) -> Dict:
-        return {
-        }

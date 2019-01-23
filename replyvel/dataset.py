@@ -394,7 +394,7 @@ class TokenizedJstatutreeDB(JstatutreeDB):
         for e in elem.iter('Sentence'):
             if isinstance(e.text, str):
                 e.text = self.tokenizer.tokenize(e.text)
-                print(e.text)
+                #print(e.text)
         return elem
     
     #def iter_elements(self, target_etype, include_tag=True):

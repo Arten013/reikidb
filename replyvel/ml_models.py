@@ -302,7 +302,7 @@ class SimString(JstatutreeModelCore):
         else:
             self.simstring = None
 
-    def build_match_factory(self, query_key, theta, match_factory_cls, weight_border=0.5):
+    def build_match_factory(self, query_key, theta, match_factory_cls):
         logger = get_logger(self.__class__.__name__+'.build_match_factory')
         query = self.db.get_jstatutree(query_key).change_root(query_key)
         if self.rspace_reversed_dict is None:
@@ -314,17 +314,26 @@ class SimString(JstatutreeModelCore):
             ss.measure = self.method
             ss.threshold = theta
         usents = {uk: sent for uk, sent in query.iterXsentence(include_code=True, include_value=True)}
+        def printer(val):
+            print(val)
+            return val
+        entire_leaves_count = 0
         for i, (qkey, qsent) in enumerate(usents.items()):
-            sims = np.array([(not match_factory.add_leaf(qkey, skey, sim)) or sim
+            qnode = self.rspace_db.get_element(qkey)
+            #print(qnode.code)
+            sims = np.array([(not match_factory.add_leaf_by_nodes(qnode, skey, 1.0))
                              for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
                              for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if str(skey) not in str(query.lawdata.code)
-                             for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
+                             #ifor sim in [self.calc_similarity(qsent, sent)] if sim >= theta
                              ])
-            query.find_by_code(qkey).attrib['weight'] = weight_border/(weight_border+np.sum(sims))
+            #query.find_by_code(qkey).attrib['weight'] = weight_border/(weight_border+np.sum(sims))
             logger.info('%03d/%d:add %d leaves similar to %s',i ,len(usents), len(sims), qkey)
+            entire_leaves_count += len(sims)
             logger.info('Currently, %d trees stored in the builder.', len(match_factory.tree_store))
             if sims.shape[0] > 0:
                 logger.info('Similarity summary: mean %.3f, max %.3f, min %.3f.', np.sum(sims)/max(sims.shape[0], 1), np.max(sims), np.min(sims))
+
+        logger.info('Finally, add %d leaves', entire_leaves_count)
         return match_factory
 
     def policy_matching(self, keys, theta, activation_func, topn=10, weight_query_by_rescount=True, weight_border=5, **kwargs):
@@ -427,7 +436,8 @@ class SimString(JstatutreeModelCore):
 
     def restrict_rspace(self, rspace_codes):
         if self.rspace_reversed_dict is not None and set(self.rspace_codes) == set(rspace_codes):
-            return 
+            return
+        self._rspace_changed_flag = True
         self.rspace_codes = rspace_codes
         self.rspace_reversed_dict = {}
         for mdb in self.reverse_unitdb.get_subdb(self.rspace_codes).split_unit():
@@ -438,8 +448,13 @@ class SimString(JstatutreeModelCore):
                 else:
                     val.extend(code)
                 self.rspace_reversed_dict[sentence_hash] = val
-    
+
+    def is_fitted(self):
+        return self.simstring_path.exists()
+
     def fit(self, task_size=None):
+        if self.is_fitted():
+            return
         print('Training begin')
 
         target_mcodes = sorted(self.db.mcodes, key=lambda x: int(x))

@@ -35,7 +35,10 @@ class TaggedVectors(object):
         if self.vector_type == 'numpy_array':
             return np.vstack(vectors)
         elif self.vector_type == 'scipy_sparse_matrix':
-            return sparse.vstack(vectors)
+            try:
+                return sparse.vstack(vectors)
+            except:
+                get_logger('TaggedVectors.vstack').critical('Invalid Shape: %s', str(vectors))
         raise Exception('Invalid vector_type '+str(self.vector_type))
     
     def add(self, vec, tag):
@@ -180,6 +183,9 @@ class JstatutreeModelCore(object):
         self.unit = unit
         os.makedirs(self.path, exist_ok=True)
         self.rspace_codes = list(db.mcodes)
+        self._rspace_code_cache = set(self.rspace_codes)
+        self._rspace_db = self.db.get_subdb(self.rspace_codes)
+        self._rspace_changed_flag = False
 
     def is_fitted(self):
         raise Exception("Not Implemented")
@@ -195,7 +201,12 @@ class JstatutreeModelCore(object):
         
     @property
     def rspace_db(self):
-        return self.db.get_subdb(self.rspace_codes)
+        #if self._rspace_code_cache != set(self.rspace_codes):
+        if self._rspace_changed_flag:
+            self._rspace_db = self.db.get_subdb(self.rspace_codes)
+            self._rspace_code_cache = set(self.rspace_codes)
+            self._rspace_changed_flag = False
+        return self._rspace_db
     
     def keys_to_ukeys(self, *keys):
         ukeys = []
@@ -223,7 +234,9 @@ class JstatutreeModelCore(object):
         return Path(self.db.path, self.MODEL_TYPE_TAG, self.tag)
     
     def restrict_rspace(self, rspace_codes):
-        self.rspace_codes = rspace_codes
+        if set(rspace_codes) != set(self.rspace_codes):
+            self.rspace_codes = rspace_codes
+            self._rspace_changed_flag = True
 
     def get_submodel(self, *mcodes):
         submodel = self.__class__(self.db.get_subdb(mcodes), self.tag, self.vector_size, self.unit)
@@ -291,6 +304,7 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
     
     def restrict_rspace(self, rspace_codes):
         self.rspace_codes = rspace_codes
+        self._rspace_changed_flag = True
         self.reload_tagged_vectors(rspace_codes)
     
     def reload_tagged_vectors(self, rspace_codes=None):
@@ -316,12 +330,16 @@ class JstatutreeVectorModelBase(JstatutreeModelCore):
     def keys_to_vectors(self, *keys, **kwargs):
         return_keys = kwargs.get('return_keys', False)
         ukeys = self.keys_to_ukeys(*keys)
-        vectors = self.tagged_vectors.get_array(self.tagged_vectors.vstack(self.vecs.get(k) for k in ukeys))
+        if len(ukeys) == 0:
+            return ([], []) if return_keys else []
+        vectors = self.tagged_vectors.get_array(self.tagged_vectors.vstack([self.vecs.get(k) for k in ukeys]))
         print(vectors.shape)
         return (ukeys, vectors) if return_keys else vectors
         
     def most_similar_by_keys(self, keys, *args, **kwargs):
         ukeys, qvecs = self.keys_to_vectors(*keys, return_keys=True)
+        if len(ukeys) == 0:
+            return []
         ranking = self.most_similar(qvecs, *args, **kwargs)
         return list(zip(ukeys, ranking))
     

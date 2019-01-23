@@ -305,7 +305,6 @@ class MatchAnalyzer(object):
                                 arti_qlabels.add('others')
                             for ql in arti_qlabels:
                                 model_output[ql].add(tarti.num)
-
             #print(model_output)
             match_csv.close()
             match_arti_csv.close()

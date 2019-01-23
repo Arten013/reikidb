@@ -277,7 +277,7 @@ class PolicyMatchFactory(object):
         self.tree_factory = tree_factory
         self.leaf_edge_store = EdgeStore()
 
-    def matching(self, scorer, traverser_cls, activator, *,threshold:float=None, least_matching_node=0):
+    def matching(self, scorer, traverser_cls, activator, *,threshold:float=None, least_matching_node=0, target_codes=None):
         logger = get_logger('PolicyMatchFactory.matching')
         logger.info('matching() called')
         obj = PolicyMatchObject(scorer.tags)
@@ -288,7 +288,9 @@ class PolicyMatchFactory(object):
         else:
             for target_tree, matching_edge_store in self.scoring(traverser_cls, scorer, activator,
                                                                     threshold=threshold,
-                                                                     least_matching_node=least_matching_node):
+                                                                     least_matching_node=least_matching_node,
+                                                                    target_codes=target_codes
+                                                                 ):
                 obj.add_unit(self.query_tree, target_tree, matching_edge_store)
         logger.info('matching() finished')
         return obj
@@ -345,14 +347,16 @@ class PolicyMatchFactory(object):
             print(target_code, scoring_count)
         logger.debug('quit')
 
-    def scoring(self, traverser_cls, scorer: AbstractScorer, activator: AbstractActivator, threshold:float, *, least_matching_node=0):
+    def scoring(self, traverser_cls, scorer: AbstractScorer, activator: AbstractActivator, threshold:float, *, least_matching_node=0, target_codes=None):
         assert not scorer.is_parallel, "you cannot use parallel scorer for scoring"
         logger = get_logger('PolicyMatchFactory.scoring') # todo: drop children
         scorer.reset_cache()
         entire_scoring_count = 0
         entire_edge_count = 0
         for target_code, target_tree in self.tree_store.items():
-            #scorer.reset_cache()
+            if str(target_codes) is not None and target_code not in target_codes:
+                continue
+            print(target_code)
             scorer.reset_tmp_cache()
             if least_matching_node > 0 and \
                     len(list(self.leaf_edge_store.iter_edges(tkey=target_code))) < least_matching_node:
@@ -361,16 +365,12 @@ class PolicyMatchFactory(object):
             logger.info('scoring %s', target_tree.lawdata.code)
             target = target_tree.getroot()
             edges = list(self.leaf_edge_store.iter_edges(tkey=target.code))
-            # reformatted_edges = scorer.reformatting_leaf_edges(*edges)
-            # print(edges)
             matching_edge_store = activator.initial_edges(edges)
             logger.debug('initial edge store size: %d', len(matching_edge_store))
             traverser = traverser_cls(self.query_tree.getroot(), target, matching_edge_store, threshold).traverse()
             edge = next(traverser)
             matching_edge_store.init_marker('delete')
             matching_edge_store.init_marker('used_leaf')
-            # entire_edge_count = len(matching_edge_store)
-            # missing_link = entire_edge_count
             missing_link = 0
             scoring_count = 0
             edge_count = 0
@@ -383,39 +383,22 @@ class PolicyMatchFactory(object):
                 scoring_count += 1
                 edge.score = scorer.scoring(edge, matching_edge_store)[0]
                 matching_edge_store.add(*edge.to_tuple())
-                if '06/062014/01050' in str(edge):
-                    print(edge)
-                # if missing_link > 0:
-                #     for e in matching_edge_store.iter_edges(qkey=edge.qnode.code, tkey=edge.tnode.code):
-                #         if e.is_leaf_pair():
-                #             matching_edge_store.mark_edge('used_leaf', e)
-                #     missing_link = entire_edge_count - matching_edge_store.count_marker('used_leaf')
                 if edge.score >= threshold:
-                    if '06/062014/01050' in str(edge):
-                        print('accepted')
                     edge_count += 1
                     #matching_edge_store.delete_descendant_edges(edge, delete_leaves=False)
                     logger.debug('add edge: %s', str(matching_edge_store.find_edge(edge)))
                     edge = traverser.send([edge.score, scorer, matching_edge_store, missing_link])
                 else:
-                    if '06/062014/01050' in str(edge):
-                        print('unaccepted')
                     matching_edge_store.mark_edge('delete', edge)
                     edge = traverser.send([edge.score, scorer, matching_edge_store, missing_link])
             logger.info('finished scoring %s', target_tree.lawdata.code)
 
-            if '06/062014/01050' in str(target_code):
-                print('1. delete "delete" marked edges')
             matching_edge_store.delete_marked_edge('delete')
-            if '06/062014/01050' in str(target_code):
-                print('2. delete low scored marked edges')
             for e in matching_edge_store.iter_edges():
                 if e.is_leaf_pair():
                     continue
                 if e.score < threshold:
                     matching_edge_store.delete_edge(e)
-            if '06/062014/01050' in str(target_code):
-                print('3. delete covered edges')
             for e in matching_edge_store.iter_edges():
                 if not e.is_leaf_pair() and matching_edge_store.has_ancestor_pair(e, include_self=False):
                     matching_edge_store.mark_edge('delete', e)

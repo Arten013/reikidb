@@ -1,4 +1,5 @@
 from .new_policy_match import PolicyMatchObject, PolicyMatchUnit
+import shutil
 from . import new_policy_match as pm
 import types
 from abc import ABC, abstractmethod
@@ -117,7 +118,7 @@ class ReikiAnnotation(object):
 
     def load(self, src: Pathlike):
         # load file
-        stack = [src]
+        stack = [Path(src)]
         while len(stack) > 0:
             path = stack.pop()
             if path.is_dir():
@@ -598,15 +599,17 @@ class Experiment(object):
                     'aggregated_result.csv',
                 ],
                 'annotation': {},
-                'results:#grid_id': {
-                    '#files': [
-                        'result.csv',
-                    ],
-                    'match_ords': {
+                'results':{
+                    'result_dir:#grid_id': {
                         '#files': [
-                            'match_ord:{ord_code}.csv',
-                            'match_ord_arti:{ord_code}_arti.csv',
-                        ]
+                            'result.csv',
+                        ],
+                        'match_ords': {
+                            '#files': [
+                                'match_ord:{ord_code}.csv',
+                                'match_ord_arti:{ord_code}_arti.csv',
+                            ]
+                        }
                     }
                 }
             }
@@ -638,6 +641,9 @@ class Experiment(object):
         leaf_match_model.restrict_rspace(self.setting.retrieve('/testset/retrieval_space'))
         grid_num = 0
         all_df = pd.DataFrame()
+        tar_path = self.get_structure(grid_num).get_path('annotation')
+        shutil.copytree(str("/home/jovyan/develop/annotation"), str(tar_path))
+        annotated_codes = list(ReikiAnnotation("/home/jovyan/develop/annotation").annotations.keys())
         while self.setting.next_vars():
             match_factory = leaf_match_model.build_match_factory(
                 query_key=self.setting.retrieve('/testset/query'),
@@ -648,14 +654,14 @@ class Experiment(object):
                 scorer=self.scorer_builder.build(),
                 traverser_cls=self.traverser_cls,
                 activator=self.activator(),
-                threshold=self.setting.retrieve('/retrieve/model/theta_v')
+                threshold=self.setting.retrieve('/retrieve/model/theta_v'),
+                target_codes=annotated_codes
             )
             analyzer = MatchAnalyzer(match, structure=self.get_structure(grid_num))
-            if grid_num == 0:
-                analyzer.set_annotation("/home/jovyan/develop/annotation")
             df = analyzer.evaluate()
             self.setting.reconstruct_df(df, grid_num)
             all_df = pd.concat([all_df, df])
+            print(df)
             grid_num += 1
         all_df = all_df.set_index(['grid_num', 'reiki'])
         all_df.to_csv(self.get_structure(0).get_path('aggregated_result'))

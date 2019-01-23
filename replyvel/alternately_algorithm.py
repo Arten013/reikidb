@@ -12,6 +12,26 @@ from queue import PriorityQueue
 import re
 
 
+class EdgeQueue(object):
+    def __init__(self):
+        self.items = [None]*1000000
+        self.head = 0
+        self.tail = 0
+
+    def is_empty(self):
+        return self.head == self.tail
+
+    def get(self) -> Edge:
+        if self.is_empty():
+            raise Exception('Queue is empty.')
+        ret: Edge = self.items[self.tail]
+        self.tail += 1
+        return ret
+
+    def put(self, item: Edge):
+        self.items[self.head] = item
+        self.head += 1
+
 class Traverser(AbstractTraverser):
     def traverse(self) -> Generator:
         logger = get_logger('Alternately.Traverser.traverse')
@@ -57,21 +77,19 @@ class AllTraverser(AbstractTraverser):  # todo: make
         self.query = query
         self.target = target
         self.threshold = threshold
-        self.edge_queue = hinit(edge_store.iter_edges())
+        self.edge_queue = EdgeQueue()#hinit(edge_store.iter_edges())
         self.edge_store = edge_store
         self.match_lca = self.edge_store.lca_pair_codes()
+        for e in edge_store.iter_edges():
+            self.edge_queue.put(e)
 
     def traverse(self) -> Generator:
         logger = get_logger('Alternately.Traverser.traverse')
-        i = 0
-        while len(self.edge_queue) > 0:
-            priority, edge = heapq.heappop(self.edge_queue)
-            #if "06/062014/0483" in edge.tnode.code:
-            #print("prio:", priority, str(edge))
+        while not self.edge_queue.is_empty():
+            edge = self.edge_queue.get()
             if edge.is_leaf_pair():
                 parent_qnode = self.rise_query_parent(edge.qnode, stop_before_none=True)
                 parent_tnode = self.rise_target_parent(edge.tnode, stop_before_none=True)
-                #print('before: ', edge)
                 edge = Edge(parent_qnode, parent_tnode)
                 if edge.is_leaf_pair():
                     item = yield False  # todo: implement halt(score, edges)
@@ -79,14 +97,10 @@ class AllTraverser(AbstractTraverser):  # todo: make
                     item = yield edge
                     if item is None:
                         continue
-                #print('after: ', edge)
             elif edge in self.edge_store:# or self.edge_store.has_ancestor_pair(edge, include_self=True, filter_mark_tag='delete'):
                 # logger.info(str(self.edge_store.find_edge(edge.to_tuple())))
                 continue
-            #print("prio:", priority, str(edge))
             else:
-                #if "06/062014/0483" in edge.tnode.code:
-                #print("yield:", priority, str(edge))
                 item = yield edge
                 if item is None:
                     continue
@@ -106,31 +120,9 @@ class AllTraverser(AbstractTraverser):  # todo: make
             if parent_tnode:
                 future_edges.append(Edge(edge.qnode, parent_tnode))
             for e in future_edges:
-                upper_limit, lower_limit = scorer.score_range(e, edge_store)
-                hpush(self.edge_queue, e, i)
-                i += 1
+                self.edge_queue.put(e)
         yield None
 
-
-class EdgeQueue(object):
-    def __init__(self):
-        self.items = [None]*1000000
-        self.head = 0
-        self.tail = 0
-
-    def is_empty(self):
-        return self.head == self.tail
-
-    def get(self) -> Edge:
-        if self.is_empty():
-            raise Exception('Queue is empty.')
-        ret: Edge = self.items[self.tail]
-        self.tail += 1
-        return ret
-
-    def put(self, item: Edge):
-        self.items[self.head] = item
-        self.head += 1
 
 class LCAPriorityTraverser(AbstractTraverser):  # todo: make
     def __init__(self, query: Element, target: Element, edge_store: EdgeStore, threshold, *, logger=None):

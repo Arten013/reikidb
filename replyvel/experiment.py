@@ -76,7 +76,10 @@ class DirectoryStructure(object):
         ret = re.split(':', tag)
         assert len(ret) == 2, 'Invalid tag: {}'.format(tag)
         if ret[1][0] == '#':
-            ret[1] = self.spec_strs[ret[1][1:]]
+            if ret[1][1:] in self.spec_strs:
+                ret[1] = self.spec_strs[ret[1][1:]]
+            else:
+                return None, None
         return ret[0], ret[1]
 
     def bfs_walk(self) -> Generator[Tuple[str, str, Path], None, None]:
@@ -89,11 +92,15 @@ class DirectoryStructure(object):
                 if key == '#files':
                     for tag in values:
                         fkey, fname = self.decode_tag(tag)
+                        if fkey is None:
+                            continue
                         yield ('file', fkey, prefix / fname)
                 else:
                     raise ValueError('Invalid Meta-Tag {}'.format(key))
             else:
                 fkey, fname = self.decode_tag(key)
+                if fkey is None:
+                    continue
                 yield ('dir', fkey, prefix / fname)
                 queue.extend([(prefix / fname, k, v) for k, v in values.items()])
 
@@ -451,7 +458,7 @@ class Experiment(object):
                 assert id(setting_obj._current_var) == id(self._current_var)
                 setting_obj.content = item
                 return setting_obj
-            elif isinstance(item, list):
+            elif isinstance(item, (list, int)):
                 return item
             elif item.startswith('$'):
                 ret = self._current_var[item[1:]]
@@ -598,6 +605,7 @@ class Experiment(object):
                     'aggregated_result.csv',
                 ],
                 'annotation': {},
+                'setting_yamls': {},
                 'results':{
                     'result_dir:#grid_id': {
                         '#files': [
@@ -634,6 +642,12 @@ class Experiment(object):
         self.traverser_cls = getattr(self.algorithm, self.setting['retrieve']['model']['traverser'])
 
         self.activator = getattr(pm.SimilarityActivator, self.setting['retrieve']['model']['activator'])
+        self.base_structure = DirectoryStructure(
+            self.result_path,
+            mapping=self.DEFAULT_STRUCTURE,
+            timestamp=self.timestamp,
+        )
+        shutil.copytree(Path(setting_path).parent, str(self.base_structure.get_path('setting_yamls')))
 
     def run(self):
         leaf_match_model = self.leaf_match_model_builder.build()

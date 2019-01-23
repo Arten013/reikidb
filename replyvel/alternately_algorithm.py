@@ -1,4 +1,5 @@
 from jstatutree.element import Element
+from scipy.stats import moment
 from jstatutree import etypes
 from pathlib import Path
 from typing import Generator, Mapping, Union, Sequence
@@ -869,6 +870,80 @@ class Scorer(object):
             min_prox = (leaf_num - match_leaf_num)//(match_leaf_num+1)+1 if leaf_num > match_leaf_num else 0
             # print('T:', max_prox, min_prox)
             return 1/(1+min_prox), 1/(1+max_prox)
+
+    class QueryLeafMoment(AbstractScorer):
+        def __init__(self, moment_n, use_logn=True, maxmatch: bool = False):
+            super().__init__()
+            self.moment_n = moment_n
+            self.maxmatch = maxmatch
+            self.use_logn = use_logn
+
+        def __str__(self):
+            return "QL{}M".format(self.moment_n)
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
+            if self.maxmatch:
+                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
+                other_results['leaf_max_match'] = matching
+            else:
+                matching = other_results.get('leaf_simple_match', None) or Scorer.leaf_simple_match(edge, edge_store,
+                                                                                                    other_results)
+            coordinates = list()
+            match_codes = set([e.qnode.code for e in matching])
+            for x, e in enumerate(edge.qnode.iterXsentence_elem()):
+                if e.code not in match_codes:
+                    coordinates.append(x)
+            m = moment(np.array(coordinates), moment=self.moment_n)
+            if self.use_logn:
+                return 1/(1+math.log(m+1)), other_results
+            else:
+                return 1/(1 + m), other_results
+
+    class TargetLeafMoment(AbstractScorer):
+        def __init__(self, moment_n, use_logn=True, maxmatch: bool = False):
+            super().__init__()
+            self.moment_n = moment_n
+            self.maxmatch = maxmatch
+            self.use_logn = use_logn
+
+        def __str__(self):
+            return "TL{}M".format(self.moment_n)
+
+        def reset_tmp_cache(self):
+            super().reset_tmp_cache()
+            self._tmp_cache.update({'nume': {}})
+
+        def reset_cache(self):
+            super().reset_cache()
+
+        def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):
+            logger = get_logger('Alternately.Scorer.QueryLeafCoverage.scoring')
+            if self.maxmatch:
+                matching = other_results.get('leaf_max_match', None) or edge_store.leaf_max_match(edge)
+                other_results['leaf_max_match'] = matching
+            else:
+                matching = other_results.get('leaf_simple_match', None) or Scorer.leaf_simple_match(edge, edge_store,
+                                                                                                    other_results)
+            coordinates = list()
+            match_codes = set([e.tnode.code for e in matching])
+            for x, e in enumerate(edge.tnode.iterXsentence_elem()):
+                if e.code not in match_codes:
+                    coordinates.append(x)
+            if len(coordinates) == 0:
+                return 0, other_results
+            m = moment(np.array(coordinates), moment=self.moment_n)
+            if self.use_logn:
+                return 1/(1+math.log(m+1)), other_results
+            else:
+                return 1/(1 + m), other_results
 
     class Balancer(AbstractScorer):
         def __init__(self):

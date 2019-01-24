@@ -166,11 +166,11 @@ class ReikiAnnotation(object):
             ans_nums = output.get(label, set())
             if label == 'others' or len(query_nums) == 0:
                 entire_fp += len(ans_nums)
-                continue
-            tp = len(true_nums & ans_nums)
-            entire_tp += tp
-            entire_tn += len(true_nums) - tp
-            entire_fp += len(ans_nums) - tp
+            else:
+                tp = len(true_nums & ans_nums)
+                entire_tp += tp
+                entire_tn += len(true_nums) - tp
+                entire_fp += len(ans_nums) - tp
         return entire_tp, entire_tn, entire_fp
 
 
@@ -458,7 +458,7 @@ class Experiment(object):
                 assert id(setting_obj._current_var) == id(self._current_var)
                 setting_obj.content = item
                 return setting_obj
-            elif isinstance(item, (list, int)):
+            elif isinstance(item, (list, int, bool)):
                 return item
             elif item.startswith('$'):
                 ret = self._current_var[item[1:]]

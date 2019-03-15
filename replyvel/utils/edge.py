@@ -99,7 +99,7 @@ class ParallelizedEdge(Edge):
     def add_to_nxbipartite(self, G: nx.DiGraph, score_idx: int = 0) -> nx.DiGraph:
         G.add_node(self.qnode.code, bipartite=0)
         G.add_node(self.tnode.code, bipartite=1)
-        G.add_edge(self.qnode.code, self.tnode.code)#, weight=self.score[score_idx])
+        G.add_edge(self.qnode.code, self.tnode.code, weight=self.score[score_idx])
         return G
 
 

@@ -28,8 +28,9 @@ X = TypeVar('X')
 
 
 class DirectoryStructure(object):
-    def __init__(self, base: Pathlike, *, mapping_file: Pathlike = None, mapping: Mapping = None, **spec_strs):
+    def __init__(self, base: Pathlike, *, mapping_file: Pathlike = None, mapping: Mapping = None, root_tag: str='main', **spec_strs):
         self.base = Path(base)
+        self.root_tag=root_tag
         self.spec_strs = spec_strs
         if mapping is not None and mapping_file is None:
             self.structure = mapping
@@ -39,8 +40,21 @@ class DirectoryStructure(object):
             raise ValueError(
                 'Invalid arguments: {0} as mapping_file and {1} as mapping'.format(repr(mapping_file), repr(mapping)))
         self.flatten_structure: Dict[str, Dict] = {'file': {}, 'dir': {}}
+        self.root = None
         for type_, key, path in self.bfs_walk():
             self.flatten_structure[type_][key] = path
+            if self.root_tag == key:
+                self.root = path
+        assert self.root is not None, 'No root directory'
+
+    def add_spec_strs(self, **new_skep_strs):
+        return DirectoryStructure(
+            base=self.base,
+            mapping = self.structure,
+            root_tag=self.root_tag,
+            **self.spec_strs,
+            **new_skep_strs
+        )
 
     @staticmethod
     def load(path: Pathlike) -> Mapping:
@@ -156,21 +170,28 @@ class ReikiAnnotation(object):
                     break
         return labels
 
-    def check(self, qcode: str, tcode: str, output: Dict) -> Tuple[int, int, int]:
+    def check(self, qcode: str, tcode: str, output: Dict, others_label: str = 'others', unk_data: str='skeptical') -> Tuple[int, int, int]:
         # check whether tnode's labels are correct according to annotation
         # return TP, TN, FP
         entire_tp, entire_tn, entire_fp = 0, 0, 0
-        for label in self.labels + ['others']:
+        for label in set(self.labels + [others_label]):
             query_nums = self.annotations[qcode].get(label, set())
             true_nums = self.annotations[tcode].get(label, set())
             ans_nums = output.get(label, set())
-            if label == 'others' or len(query_nums) == 0:
-                entire_fp += len(ans_nums)
+            if unk_data=='skeptical':
+                if label == others_label or len(query_nums) == 0:
+                    entire_fp += len(ans_nums)
+                    continue
+            elif unk_data=='brave':
+                if len(query_nums) == 0:
+                    entire_fp += len(ans_nums)
+                    continue
             else:
-                tp = len(true_nums & ans_nums)
-                entire_tp += tp
-                entire_tn += len(true_nums) - tp
-                entire_fp += len(ans_nums) - tp
+                raise ValueError('Invalid value in argument "unk_data" ({})'.format(repr(unk_data)))
+            tp = len(true_nums & ans_nums)
+            entire_tp += tp
+            entire_tn += len(true_nums) - tp
+            entire_fp += len(ans_nums) - tp
         return entire_tp, entire_tn, entire_fp
 
 
@@ -267,7 +288,7 @@ class MatchAnalyzer(object):
     def load(cls, base: Pathlike):
         return pickle.load(base)
 
-    def evaluate(self, render_graphs: bool = False, **render_args) -> pd.DataFrame:
+    def evaluate(self, render_graphs: bool = False, unk_data: str = 'skeptical', others_label='C00', **render_args) -> pd.DataFrame:
         # calculate precision, recall, F-val, and other results.
         # generate detail results and save as logs
         df = pd.DataFrame(columns=['TP', 'TN', 'FP', 'Precision', 'Recall'])
@@ -276,7 +297,7 @@ class MatchAnalyzer(object):
         for tkey, u in self.match.units.items():
             if tkey not in annotation.annotations:
                 continue
-            model_output: Dict[str, Set[str]] = {l: set() for l in annotation.labels + ['others']}
+            model_output: Dict[str, Set[str]] = {l: set() for l in annotation.labels + [others_label]}
             macro[tkey] = {}
 
             header = "{0} vs. {1}".format(
@@ -289,7 +310,7 @@ class MatchAnalyzer(object):
             match_arti_csv = MatchAnalyzer.MatchCSVBuilder(match_csv_arti_path, header=[header])
 
             if render_graphs:
-                self.render_comp_table(**render_args)
+                self.render_comp_table(u, **render_args)
             for skey, edges, edge_store in u.find_matching_edge(threshold=0.0):
                 assert skey == 'default', 'this class do not applicable for multi-score.'
                 for edge in edges:
@@ -305,18 +326,27 @@ class MatchAnalyzer(object):
                             article_edge = Edge(qarti, tarti, edge.score)
                             arti_qlabels = annotation.node_to_labels(qarti)
                             arti_tlabels = annotation.node_to_labels(tarti)
-                            if len(arti_qlabels) == 0 and len(arti_tlabels) == 0:
-                                continue
+                            assert len(arti_qlabels) * len(arti_tlabels) > 0, 'Unlabeled data exists'
+                            if unk_data == 'brave':
+                                pass
+                            elif unk_data == 'skeptical':
+                                if arti_qlabels == {others_label} and arti_tlabels == {others_label}:
+                                    continue
+                            else:
+                                raise ValueError('Invalid value in argument "unk_data" ({})'.format(repr(unk_data)))
                             match_arti_csv.write_edge(article_edge, arti_qlabels, arti_tlabels)
-                            if len(arti_qlabels) == 0:
-                                arti_qlabels.add('others')
                             for ql in arti_qlabels:
                                 model_output[ql].add(tarti.num)
             #print(model_output)
             match_csv.close()
             match_arti_csv.close()
-            tp, tn, fp = annotation.check(str(list(self.match.units.values())[0].query_tree.lawdata.code), tkey,
-                                          model_output)
+            tp, tn, fp = annotation.check(
+                str(list(self.match.units.values())[0].query_tree.lawdata.code),
+                tkey,
+                model_output,
+                others_label,
+                unk_data=unk_data
+            )
             df.loc[tkey] = [tp, tn, fp, tp / (tp + fp) if (tp + fp) > 0 else 0, tp / (tp + tn) if (tp + tn) > 0 else 0]
         micro = df.aggregate(['sum'])
         micro.loc['sum', 'Precision'] = micro.loc['sum', 'TP'] / (micro.loc['sum', 'TP'] + micro.loc['sum', 'FP'])
@@ -344,14 +374,14 @@ class MatchAnalyzer(object):
 
     def render_comp_table(self, unit: PolicyMatchUnit, output_format='pdf'):
         tkey = unit.match_tree.lawdata.code
-        path = self.structure.get_path('graph_gov_dir', ord_code=re.sub('/', '-', tkey))
+        path = self.structure.get_path('graph_gov_dir', ord_code=re.sub('/', '-', str(tkey)))
         os.makedirs(str(path), exist_ok=True)
         name = 'main'
         G = unit.comp_table(threshold=0, sub_branch='ALL')
-        with (path / (name + '.pdf')).open('w') as f:
+        with (path / name).open('w') as f:
             f.write(G.source)
         if self.render_core(path / name, output_format):
-            print("render:", path, unit.match_tree.lawdata.name)
+            print("render:", path / name, unit.match_tree.lawdata.name)
         else:
             print('skip: ', str(path / name))
         for i, (t, e, G) in enumerate(
@@ -364,12 +394,12 @@ class MatchAnalyzer(object):
             e.score = round(e.score, 3)
             name = "{0}-{1}".format(str(e.qnode), str(e.tnode))
             G = unit.comp_table(threshold=0, sub_branch='ALL')
-            with (path / (name + '.pdf')).open('w') as f:
+            with (path / name).open('w') as f:
                 f.write(G.source)
-                if self.render_core(path / name, output_format):
-                    print("render:", path, unit.match_tree.lawdata.name)
-                else:
-                    print('skip: ', str(path / name))
+            if self.render_core(path / name, output_format):
+                print("render:", path, unit.match_tree.lawdata.name)
+            else:
+                print('skip: ', str(path / name))
 
 
 class Experiment(object):
@@ -458,7 +488,7 @@ class Experiment(object):
                 assert id(setting_obj._current_var) == id(self._current_var)
                 setting_obj.content = item
                 return setting_obj
-            elif isinstance(item, (list, int, bool)):
+            elif isinstance(item, (list, int)):
                 return item
             elif item.startswith('$'):
                 ret = self._current_var[item[1:]]
@@ -549,8 +579,8 @@ class Experiment(object):
                 self.target_codes = target_codes
 
         def build(self):
-            query_code: str = self.setting['query']
-            target_codes: List[str] = self.setting['retrieval_space']
+            query_code: str = self.setting['query']['code']
+            target_codes: List[str] = self.setting['retrieval_space']['code']
             return self.TestSet(query_code, target_codes)
 
     class LeafMatchBuilder(BuilderAbstract):
@@ -594,34 +624,43 @@ class Experiment(object):
                         return scorer
                     built_scorers[name] = scorer
 
-    DEFAULT_STRUCTURE = {
-        'main:#timestamp':
-            {
-                '#files': [
-                    'analyzer:analyzer.pkl',
-                    'report.txt',
-                    'description.txt',
-                    'params.csv',
-                    'aggregated_result.csv',
-                ],
-                'annotation': {},
-                'setting_yamls': {},
-                'results':{
-                    'result_dir:#grid_id': {
-                        '#files': [
-                            'result.csv',
-                        ],
-                        'match_ords': {
-                            '#files': [
-                                'match_ord:{ord_code}.csv',
-                                'match_ord_arti:{ord_code}_arti.csv',
-                            ]
+    DEFAULT_STRUCTURE = \
+        {'base_t:#testset_tag':
+            {'base_r:#rspace_tag':
+                {'base_q:#query_tag':
+                    {'base_m:#model_tag':
+                        {'unk_mode:#unk_mode':
+                            {'main:#timestamp':
+                                {
+                                    '#files': [
+                                        'analyzer:analyzer.pkl',
+                                        'report.txt',
+                                        'description.txt',
+                                        'params.csv',
+                                        'aggregated_result.csv',
+                                    ],
+                                    'annotation': {},
+                                    'setting_yamls': {},
+                                    'results':{
+                                        'result_dir:#grid_id': {
+                                            '#files': [
+                                                'result.csv',
+                                            ],
+                                            'match_ords': {
+                                                '#files': [
+                                                    'match_ord:{ord_code}.csv',
+                                                    'match_ord_arti:{ord_code}_arti.csv',
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-    }
-
+        }
     def __init__(self, setting_path: Pathlike, result_path: Pathlike):
         self.leaf_match_model: ml_models.JstatutreeModelCore = None
         self.result_path = result_path
@@ -646,12 +685,19 @@ class Experiment(object):
             self.result_path,
             mapping=self.DEFAULT_STRUCTURE,
             timestamp=self.timestamp,
+            query_tag=self.setting.retrieve('./testset/query/tag'),
+            testset_tag=self.setting.retrieve('./testset/tag'),
+            model_tag=self.setting.retrieve('./leaf_matching/model/tag'),
+            rspace_tag=self.setting.retrieve('./testset/retrieval_space/tag'),
+            unk_mode=self.setting.retrieve('./testset/unk_data/mode')
         )
+        print('savedir:')
+        print(str(self.base_structure.root))
         shutil.copytree(Path(setting_path).parent, str(self.base_structure.get_path('setting_yamls')))
 
     def run(self):
         leaf_match_model = self.leaf_match_model_builder.build()
-        leaf_match_model.restrict_rspace(self.setting.retrieve('/testset/retrieval_space'))
+        leaf_match_model.restrict_rspace(self.setting.retrieve('/testset/retrieval_space/codes'))
         grid_num = 0
         all_df = pd.DataFrame()
         tar_path = self.get_structure(grid_num).get_path('annotation')
@@ -663,7 +709,7 @@ class Experiment(object):
             match_factory = leaf_match_cache.get(finger_print, None)
             if match_factory is None:
                 match_factory = leaf_match_model.build_match_factory(
-                    query_key=self.setting.retrieve('/testset/query'),
+                    query_key=self.setting.retrieve('/testset/query/code'),
                     theta=self.setting.retrieve('/leaf_matching/theta_s'),
                     match_factory_cls=pm.PolicyMatchFactory,
                 )
@@ -676,7 +722,10 @@ class Experiment(object):
                 target_codes=annotated_codes
             )
             analyzer = MatchAnalyzer(match, structure=self.get_structure(grid_num))
-            df = analyzer.evaluate()
+            df = analyzer.evaluate(
+                unk_data=self.setting.retrieve('/testset/unk_data/mode'),
+                others_label=self.setting.retrieve('/testset/unk_data/unk_label')
+            )
             self.setting.reconstruct_df(df, grid_num)
             all_df = pd.concat([all_df, df])
             print(df)
@@ -686,8 +735,8 @@ class Experiment(object):
         return all_df
 
     def get_structure(self, i: int) -> DirectoryStructure:
-        return DirectoryStructure(
-            self.result_path,
-            mapping=self.DEFAULT_STRUCTURE,
-            timestamp=self.timestamp,
-            grid_id='grid-{0:04}'.format(i))
+        return self.base_structure.add_spec_strs(
+            grid_id='grid-{0:04}'.format(i)
+        )
+
+

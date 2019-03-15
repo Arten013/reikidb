@@ -55,7 +55,7 @@ class AbstractScorer(abc.ABC):  # todo: from other_result to calc_cache
 
 
     def __str__(self):
-        return self.__class__.name
+        return self.__class__.__name__
 
     @abc.abstractmethod
     def scoring(self, edge: Edge, edge_store: EdgeStore, **other_results):

@@ -324,7 +324,7 @@ class SimString(JstatutreeModelCore):
             sims = np.array([(not match_factory.add_leaf_by_nodes(qnode, skey, 1.0))
                              for sent in set(s for ss in simstrings.values() for s in ss.retrieve(qsent))
                              for skey in self.rspace_reversed_dict.get(self.reverse_unitdb.sentence_hash(sent), []) if str(skey) not in str(query.lawdata.code)
-                             #ifor sim in [self.calc_similarity(qsent, sent)] if sim >= theta
+                             #for sim in [self.calc_similarity(qsent, sent)] if sim >= theta
                              ])
             #query.find_by_code(qkey).attrib['weight'] = weight_border/(weight_border+np.sum(sims))
             logger.info('%03d/%d:add %d leaves similar to %s',i ,len(usents), len(sims), qkey)

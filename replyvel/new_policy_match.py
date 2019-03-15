@@ -353,8 +353,9 @@ class PolicyMatchFactory(object):
         scorer.reset_cache()
         entire_scoring_count = 0
         entire_edge_count = 0
+        entire_dec_height = 0
         for target_code, target_tree in self.tree_store.items():
-            if str(target_codes) is not None and target_code not in target_codes:
+            if target_codes is not None and str(target_code) not in target_codes:
                 continue
             print(target_code)
             scorer.reset_tmp_cache()
@@ -367,7 +368,8 @@ class PolicyMatchFactory(object):
             edges = list(self.leaf_edge_store.iter_edges(tkey=target.code))
             matching_edge_store = activator.initial_edges(edges)
             logger.debug('initial edge store size: %d', len(matching_edge_store))
-            traverser = traverser_cls(self.query_tree.getroot(), target, matching_edge_store, threshold).traverse()
+            traverser_obj = traverser_cls(self.query_tree.getroot(), target, matching_edge_store, threshold)
+            traverser = traverser_obj.traverse()
             edge = next(traverser)
             matching_edge_store.init_marker('delete')
             matching_edge_store.init_marker('used_leaf')
@@ -407,6 +409,9 @@ class PolicyMatchFactory(object):
             #print(target_code, scoring_count)
             entire_scoring_count += scoring_count
             entire_edge_count += edge_count
+            if hasattr(traverser_obj, 'match_lca') and traverser_obj.match_lca is not None:
+                entire_dec_height += traverser_obj.match_lca[0].count('/') - 3 + traverser_obj.match_lca[1].count("/") - 3
         print('entire scoring:', entire_scoring_count)
         print('edge count:', entire_edge_count)
+        print('dec_height:', entire_dec_height)
         logger.debug('quit')
